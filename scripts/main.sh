@@ -10,34 +10,6 @@ source "$SESSIONIZER_DIR/scripts/lib/sessions.sh"
 source "$SESSIONIZER_DIR/scripts/lib/windows.sh"
 source "$SESSIONIZER_DIR/scripts/lib/ui.sh"
 
-# Set up temporary tmux keybindings that write to the FIFO
-bind_sessionizer_keys() {
-    local fifo="$FIFO_PATH"
-
-    tmux bind-key -n Up     run-shell "printf '%s\\n' up     > $fifo 2>/dev/null || true"  || true
-    tmux bind-key -n Down   run-shell "printf '%s\\n' down   > $fifo 2>/dev/null || true"  || true
-    tmux bind-key -n Enter  run-shell "printf '%s\\n' select > $fifo 2>/dev/null || true"  || true
-    tmux bind-key -n c      run-shell "printf '%s\\n' new    > $fifo 2>/dev/null || true"  || true
-    tmux bind-key -n r      run-shell "printf '%s\\n' rename > $fifo 2>/dev/null || true"  || true
-    tmux bind-key -n x      run-shell "printf '%s\\n' kill   > $fifo 2>/dev/null || true"  || true
-    tmux bind-key -n h      run-shell "printf '%s\\n' help   > $fifo 2>/dev/null || true"  || true
-    tmux bind-key -n Escape run-shell "printf '%s\\n' quit   > $fifo 2>/dev/null || true"  || true
-    tmux bind-key -n q      run-shell "printf '%s\\n' quit   > $fifo 2>/dev/null || true"  || true
-}
-
-# Remove temporary keybindings
-unbind_sessionizer_keys() {
-    tmux unbind-key -n Up     2>/dev/null || true
-    tmux unbind-key -n Down   2>/dev/null || true
-    tmux unbind-key -n Enter  2>/dev/null || true
-    tmux unbind-key -n c      2>/dev/null || true
-    tmux unbind-key -n r      2>/dev/null || true
-    tmux unbind-key -n x      2>/dev/null || true
-    tmux unbind-key -n h      2>/dev/null || true
-    tmux unbind-key -n Escape 2>/dev/null || true
-    tmux unbind-key -n q      2>/dev/null || true
-}
-
 # Create FIFO for IPC (fixed path — only one sessionizer at a time)
 FIFO_PATH="/tmp/tmux-sessionizer.fifo"
 rm -f "$FIFO_PATH"
@@ -47,13 +19,10 @@ mkfifo "$FIFO_PATH" 2>/dev/null || true
 exec 3<>"$FIFO_PATH"
 
 # Cleanup on exit
-trap 'sessionizer_cleanup; unbind_sessionizer_keys; rm -f "$FIFO_PATH"; exec 3>&-' EXIT INT TERM
+trap 'sessionizer_cleanup; rm -f "$FIFO_PATH"; exec 3>&-' EXIT INT TERM
 
 # Initialize TUI
 ui_init
-
-# Bind temporary keys for FIFO IPC
-bind_sessionizer_keys
 
 # Main loop
 while true; do
