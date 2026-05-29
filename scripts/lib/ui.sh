@@ -27,6 +27,11 @@ C_CLR=$(tput el 2>/dev/null || echo '\033[K')
 C_SAVE=$(tput sc 2>/dev/null || echo '\0337')
 C_RESTORE=$(tput rc 2>/dev/null || echo '\0338')
 
+# Customizable colors (defaults match standard colors above)
+C_TITLE=$C_CYAN
+C_SELECT=$C_YELLOW
+C_PREVIEW=$C_GREEN
+
 # ---- State ----
 SELECTED=0         # Currently selected session index
 SESSIONS=()        # Array of session names
@@ -34,6 +39,40 @@ SESSION_DATA=()    # Array of "name|windows|created"
 HELP_VISIBLE=false # Whether help is shown
 TERM_ROWS=24       # Terminal height
 TERM_COLS=80       # Terminal width
+
+# ---- Color Customization ----
+# Load colors from tmux @sessionizer_color_* options
+_load_color() {
+    local var_name="$1" option_name="$2"
+    local opt_val
+
+    opt_val=$(tmux show-option -gv "$option_name" 2>/dev/null || true)
+    [ -z "$opt_val" ] && return
+
+    case "$opt_val" in
+        black|red|green|yellow|blue|magenta|cyan|white)
+            local color_num
+            case "$opt_val" in
+                black) color_num=0 ;; red) color_num=1 ;; green) color_num=2 ;;
+                yellow) color_num=3 ;; blue) color_num=4 ;; magenta) color_num=5 ;;
+                cyan) color_num=6 ;; white) color_num=7 ;;
+            esac
+            eval "$var_name=\$(tput setaf \$color_num 2>/dev/null || echo \"\$C_RESET\")"
+            ;;
+        bold)
+            eval "$var_name=\$C_BOLD"
+            ;;
+        reverse)
+            eval "$var_name=\$C_REVERSE"
+            ;;
+    esac
+}
+
+_load_colors() {
+    _load_color C_TITLE    @sessionizer_color_title
+    _load_color C_SELECT   @sessionizer_color_select
+    _load_color C_PREVIEW  @sessionizer_color_preview
+}
 
 # ---- Init ----
 ui_init() {
@@ -46,6 +85,9 @@ ui_init() {
 
     # Get terminal size
     ui_update_size
+
+    # Load customizable colors
+    _load_colors
 
     # Load initial data
     ui_refresh_sessions
@@ -75,7 +117,7 @@ ui_refresh_sessions() {
 ui_draw_header() {
     # Line 1: Title
     tput cup 0 0 2>/dev/null || true
-    echo -n "${C_CLR}${C_BOLD}${C_CYAN} tmux-sessionizer${C_RESET}"
+    echo -n "${C_CLR}${C_BOLD}${C_TITLE} tmux-sessionizer${C_RESET}"
     echo -n "  ${C_BLACK}${C_WHITE}[arrows: navigate]${C_RESET}"
 
     # Line 2: Separator
@@ -108,7 +150,7 @@ ui_draw_session_list() {
         fi
 
         if [ $i -eq $SELECTED ]; then
-            echo -n "${C_CLR}${C_REVERSE} ${C_BOLD}> ${name}${C_RESET}  ${C_YELLOW}[${win_count} windows]${C_RESET}"
+            echo -n "${C_CLR}${C_REVERSE} ${C_BOLD}> ${name}${C_RESET}  ${C_SELECT}[${win_count} windows]${C_RESET}"
         else
             echo -n "${C_CLR}   ${name}  ${C_BLUE}[${win_count} windows]${C_RESET}"
         fi
@@ -135,7 +177,7 @@ ui_draw_preview() {
         local name="${SESSIONS[$SELECTED]}"
         local preview=$(window_preview "$name")
         local win_count=$(window_count "$name")
-        echo -n "${C_CLR}${C_BOLD}${C_GREEN} ${name}${C_RESET}  ${C_CYAN}${win_count} windows:${C_RESET}  ${preview}"
+        echo -n "${C_CLR}${C_BOLD}${C_PREVIEW} ${name}${C_RESET}  ${C_CYAN}${win_count} windows:${C_RESET}  ${preview}"
     else
         echo -n "${C_CLR}${C_YELLOW} No sessions${C_RESET}"
     fi
@@ -164,7 +206,7 @@ ui_render() {
 ui_read_key() {
     # Read one character (raw mode)
     local key
-    IFS= read -r -n1 key 2>/dev/null || true
+    IFS= read -r -n1 -t 0.5 key 2>/dev/null || true
 
     # Check for escape sequences
     if [ "$key" = $'\033' ]; then

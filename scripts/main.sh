@@ -16,6 +16,13 @@ trap 'sessionizer_cleanup' EXIT INT TERM
 # Initialize TUI
 ui_init
 
+# Load customizable keybindings from tmux options
+KEY_NEW=$(tmux show-option -gv @sessionizer_key_new 2>/dev/null || echo "n")
+KEY_RENAME=$(tmux show-option -gv @sessionizer_key_rename 2>/dev/null || echo "r")
+KEY_KILL=$(tmux show-option -gv @sessionizer_key_kill 2>/dev/null || echo "x")
+KEY_HELP=$(tmux show-option -gv @sessionizer_key_help 2>/dev/null || echo "h")
+KEY_QUIT=$(tmux show-option -gv @sessionizer_key_quit 2>/dev/null || echo "q")
+
 # Main loop
 while true; do
     ui_render
@@ -26,11 +33,11 @@ while true; do
         "down")     ui_cursor_down ;;
         "enter")    ui_select ;;
         "")         ;;  # timeout or no input
-        "n")        ui_create_session ;;
-        "r")        ui_rename_session ;;
-        "x")        ui_kill_session ;;
-        "h")        ui_toggle_help ;;
-        "q")        break ;;
+        "$KEY_NEW")     ui_create_session ;;
+        "$KEY_RENAME")  ui_rename_session ;;
+        "$KEY_KILL")    ui_kill_session ;;
+        "$KEY_HELP")    ui_toggle_help ;;
+        "$KEY_QUIT")    break ;;
         # Ctrl-c, escape, or any other key exits
         $'\003')    break ;;  # Ctrl-c
         "escape")   break ;;
