@@ -202,27 +202,6 @@ ui_render() {
     ui_draw_status
 }
 
-# ---- Key Input ----
-ui_read_key() {
-    # Read one character (raw mode)
-    local key
-    IFS= read -r -n1 -t 0.5 key 2>/dev/null || true
-
-    # Check for escape sequences
-    if [ "$key" = $'\033' ]; then
-        read -r -n2 -t 0.05 seq 2>/dev/null || true
-        case "$seq" in
-            '[A') echo "up" ;;
-            '[B') echo "down" ;;
-            '[C') echo "right" ;;
-            '[D') echo "left" ;;
-            *)    echo "escape" ;;
-        esac
-    else
-        echo "$key"
-    fi
-}
-
 # ---- Cleanup ----
 ui_cleanup() {
     sessionizer_cleanup
@@ -241,6 +220,7 @@ ui_select() {
     if [ ${#SESSIONS[@]} -gt 0 ] && [ $SELECTED -lt ${#SESSIONS[@]} ]; then
         local name="${SESSIONS[$SELECTED]}"
         session_switch "$name"
+        exit 0
     fi
 }
 

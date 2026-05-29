@@ -26,21 +26,33 @@ KEY_QUIT=$(tmux show-option -gv @sessionizer_key_quit 2>/dev/null || echo "q")
 # Main loop
 while true; do
     ui_render
-    key=$(ui_read_key)
+
+    # Read key directly (no command substitution to avoid subshell issues)
+    key=""
+    IFS= read -r -n1 -t 0.5 key 2>/dev/null || true
+
+    # Handle escape sequences for arrow keys
+    if [ "$key" = $'\033' ]; then
+        seq=""
+        IFS= read -r -n2 -t 0.1 seq 2>/dev/null || true
+        case "$seq" in
+            '[A') key="up" ;;
+            '[B') key="down" ;;
+            *)    key="escape" ;;
+        esac
+    fi
 
     case "$key" in
         "up")       ui_cursor_up || true ;;
         "down")     ui_cursor_down || true ;;
-        "enter")    ui_select || true ;;
-        "")         ;;  # timeout or no input
+        $'\n'|$'\r') ui_select || true ;;
+        "")         ;;  # timeout or no input — just re-render
         "$KEY_NEW")     ui_create_session || true ;;
         "$KEY_RENAME")  ui_rename_session || true ;;
         "$KEY_KILL")    ui_kill_session || true ;;
         "$KEY_HELP")    ui_toggle_help || true ;;
         "$KEY_QUIT")    break ;;
-        # Ctrl-c, escape, or any other key exits
-        $'\003')    break ;;  # Ctrl-c
         "escape")   break ;;
-        *)          break ;;
+        *)          ;;  # ignore unknown keys (don't exit)
     esac
 done
