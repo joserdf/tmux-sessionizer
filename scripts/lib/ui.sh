@@ -203,8 +203,14 @@ ui_render() {
 }
 
 # ---- Cleanup ----
+# Terminal restoration is handled by main.sh's EXIT trap (via sessionizer_cleanup).
+# Individual actions (create/rename/kill) call ui_cleanup before showing prompts,
+# then ui_init to re-enter TUI mode.
 ui_cleanup() {
-    sessionizer_cleanup
+    stty echo icanon 2>/dev/null || true
+    tput cnorm 2>/dev/null || true
+    tput rmcup 2>/dev/null || true
+    tput sgr0 2>/dev/null || true
 }
 
 # ---- Actions ----
