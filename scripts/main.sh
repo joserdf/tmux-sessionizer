@@ -10,6 +10,31 @@ source "$SESSIONIZER_DIR/scripts/lib/sessions.sh"
 source "$SESSIONIZER_DIR/scripts/lib/windows.sh"
 source "$SESSIONIZER_DIR/scripts/lib/ui.sh"
 
+# Set up temporary M-prefix keybindings that write to the FIFO
+bind_sessionizer_keys() {
+    local fifo="$FIFO_PATH"
+    tmux bind-key -n M-Up     run-shell "printf '%s\\n' up     > '$fifo' 2>/dev/null || true" || true
+    tmux bind-key -n M-Down   run-shell "printf '%s\\n' down   > '$fifo' 2>/dev/null || true" || true
+    tmux bind-key -n M-Enter  run-shell "printf '%s\\n' select > '$fifo' 2>/dev/null || true" || true
+    tmux bind-key -n M-c      run-shell "printf '%s\\n' new    > '$fifo' 2>/dev/null || true" || true
+    tmux bind-key -n M-r      run-shell "printf '%s\\n' rename > '$fifo' 2>/dev/null || true" || true
+    tmux bind-key -n M-x      run-shell "printf '%s\\n' kill   > '$fifo' 2>/dev/null || true" || true
+    tmux bind-key -n M-h      run-shell "printf '%s\\n' help   > '$fifo' 2>/dev/null || true" || true
+    tmux bind-key -n M-q      run-shell "printf '%s\\n' quit   > '$fifo' 2>/dev/null || true" || true
+}
+
+# Remove temporary M-prefix keybindings
+unbind_sessionizer_keys() {
+    tmux unbind-key -n M-Up    2>/dev/null || true
+    tmux unbind-key -n M-Down  2>/dev/null || true
+    tmux unbind-key -n M-Enter 2>/dev/null || true
+    tmux unbind-key -n M-c     2>/dev/null || true
+    tmux unbind-key -n M-r     2>/dev/null || true
+    tmux unbind-key -n M-x     2>/dev/null || true
+    tmux unbind-key -n M-h     2>/dev/null || true
+    tmux unbind-key -n M-q     2>/dev/null || true
+}
+
 # Create FIFO for IPC (fixed path — only one sessionizer at a time)
 FIFO_PATH="/tmp/tmux-sessionizer.fifo"
 rm -f "$FIFO_PATH"
@@ -19,10 +44,13 @@ mkfifo "$FIFO_PATH" 2>/dev/null || true
 exec 3<>"$FIFO_PATH"
 
 # Cleanup on exit
-trap 'sessionizer_cleanup; rm -f "$FIFO_PATH"; exec 3>&-' EXIT INT TERM
+trap 'sessionizer_cleanup; unbind_sessionizer_keys; rm -f "$FIFO_PATH"; exec 3>&-' EXIT INT TERM
 
 # Initialize TUI
 ui_init
+
+# Bind temporary M-prefix keys for the popup session
+bind_sessionizer_keys
 
 # Main loop
 while true; do
