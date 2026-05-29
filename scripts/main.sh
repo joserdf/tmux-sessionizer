@@ -29,14 +29,14 @@ while true; do
     key=$(ui_read_key)
 
     case "$key" in
-        "up")       ui_cursor_up ;;
-        "down")     ui_cursor_down ;;
-        "enter")    ui_select ;;
+        "up")       ui_cursor_up || true ;;
+        "down")     ui_cursor_down || true ;;
+        "enter")    ui_select || true ;;
         "")         ;;  # timeout or no input
-        "$KEY_NEW")     ui_create_session ;;
-        "$KEY_RENAME")  ui_rename_session ;;
-        "$KEY_KILL")    ui_kill_session ;;
-        "$KEY_HELP")    ui_toggle_help ;;
+        "$KEY_NEW")     ui_create_session || true ;;
+        "$KEY_RENAME")  ui_rename_session || true ;;
+        "$KEY_KILL")    ui_kill_session || true ;;
+        "$KEY_HELP")    ui_toggle_help || true ;;
         "$KEY_QUIT")    break ;;
         # Ctrl-c, escape, or any other key exits
         $'\003')    break ;;  # Ctrl-c

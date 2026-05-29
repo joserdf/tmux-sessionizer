@@ -10,7 +10,7 @@ window_list() {
 window_count() {
     local count
     count=$(tmux list-windows -t "$1" 2>/dev/null | wc -l || echo "0")
-    echo "$count"
+    echo "$count" || true
 }
 
 # Get formatted window preview for a session

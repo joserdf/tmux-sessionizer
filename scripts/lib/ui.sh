@@ -110,7 +110,7 @@ ui_refresh_sessions() {
     # Clamp selection
     [ ${#SESSIONS[@]} -eq 0 ] && SELECTED=0
     [ $SELECTED -ge ${#SESSIONS[@]} ] && SELECTED=$(( ${#SESSIONS[@]} - 1 ))
-    [ $SELECTED -lt 0 ] && SELECTED=0
+    [ $SELECTED -lt 0 ] && SELECTED=0 || true
 }
 
 # ---- Drawing ----
@@ -230,11 +230,11 @@ ui_cleanup() {
 
 # ---- Actions ----
 ui_cursor_up() {
-    [ $SELECTED -gt 0 ] && SELECTED=$(( SELECTED - 1 ))
+    [ $SELECTED -gt 0 ] && SELECTED=$(( SELECTED - 1 )) || true
 }
 
 ui_cursor_down() {
-    [ $SELECTED -lt $(( ${#SESSIONS[@]} - 1 )) ] && SELECTED=$(( SELECTED + 1 ))
+    [ $SELECTED -lt $(( ${#SESSIONS[@]} - 1 )) ] && SELECTED=$(( SELECTED + 1 )) || true
 }
 
 ui_select() {
