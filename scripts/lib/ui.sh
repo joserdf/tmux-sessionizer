@@ -293,8 +293,23 @@ ui_window_select() {
         local session="${SESSIONS[$SELECTED]}"
         local entry="${WINDOWS[$WIN_SELECTED]}"
         local widx="${entry%%|*}"
-        session_switch "${session}:${widx}" || true
-        exit 0
+
+        # Exit TUI mode to free terminal for nested tmux
+        ui_cleanup
+
+        # Make the selected window active in its session
+        tmux select-window -t "${session}:${widx}" 2>/dev/null || true
+
+        # Open the session inside the popup via nested tmux (no TMUX= to allow nesting)
+        # User interacts with the session. Detach with prefix+d to return to TUI.
+        env -u TMUX tmux attach-session -t "${session}" 2>/dev/null || true
+
+        # Re-enter TUI mode
+        MODE="sessions"
+        WIN_SELECTED=0
+        HELP_VISIBLE=false
+        LAST_ACTIVITY=$(date +%s)
+        ui_init
     fi
 }
 
