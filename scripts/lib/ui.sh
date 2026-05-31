@@ -210,9 +210,9 @@ ui_render() {
 # then ui_init to re-enter TUI mode.
 ui_cleanup() {
     stty echo icanon 2>/dev/null || true
-    tput clear 2>/dev/null || true
     tput cnorm 2>/dev/null || true
     tput rmcup 2>/dev/null || true
+    tput clear 2>/dev/null || true
     tput sgr0 2>/dev/null || true
 }
 
