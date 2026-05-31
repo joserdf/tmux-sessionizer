@@ -1,75 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Determine plugin directory (script lives in scripts/)
 SESSIONIZER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Source libraries
 source "$SESSIONIZER_DIR/helpers/cleanup.sh"
 source "$SESSIONIZER_DIR/scripts/lib/sessions.sh"
 source "$SESSIONIZER_DIR/scripts/lib/windows.sh"
 source "$SESSIONIZER_DIR/scripts/lib/ui.sh"
 
-# Set up temporary M-prefix keybindings that write to the FIFO
-bind_sessionizer_keys() {
-    local fifo="$FIFO_PATH"
-    tmux bind-key -n M-Up     run-shell "printf '%s\\n' up     > '$fifo' 2>/dev/null || true" || true
-    tmux bind-key -n M-Down   run-shell "printf '%s\\n' down   > '$fifo' 2>/dev/null || true" || true
-    tmux bind-key -n M-Enter  run-shell "printf '%s\\n' select > '$fifo' 2>/dev/null || true" || true
-    tmux bind-key -n M-c      run-shell "printf '%s\\n' new    > '$fifo' 2>/dev/null || true" || true
-    tmux bind-key -n M-r      run-shell "printf '%s\\n' rename > '$fifo' 2>/dev/null || true" || true
-    tmux bind-key -n M-x      run-shell "printf '%s\\n' kill   > '$fifo' 2>/dev/null || true" || true
-    tmux bind-key -n M-h      run-shell "printf '%s\\n' help   > '$fifo' 2>/dev/null || true" || true
-    tmux bind-key -n M-q      run-shell "printf '%s\\n' quit   > '$fifo' 2>/dev/null || true" || true
-}
+trap 'sessionizer_cleanup' EXIT INT TERM
 
-# Remove temporary M-prefix keybindings
-unbind_sessionizer_keys() {
-    tmux unbind-key -n M-Up    2>/dev/null || true
-    tmux unbind-key -n M-Down  2>/dev/null || true
-    tmux unbind-key -n M-Enter 2>/dev/null || true
-    tmux unbind-key -n M-c     2>/dev/null || true
-    tmux unbind-key -n M-r     2>/dev/null || true
-    tmux unbind-key -n M-x     2>/dev/null || true
-    tmux unbind-key -n M-h     2>/dev/null || true
-    tmux unbind-key -n M-q     2>/dev/null || true
-}
-
-# Create FIFO for IPC (fixed path — only one sessionizer at a time)
-FIFO_PATH="/tmp/tmux-sessionizer.fifo"
-rm -f "$FIFO_PATH"
-mkfifo "$FIFO_PATH" 2>/dev/null || true
-
-# Open FIFO read-write so read does not block waiting for a writer
-exec 3<>"$FIFO_PATH"
-
-# Cleanup on exit
-trap 'sessionizer_cleanup; unbind_sessionizer_keys; rm -f "$FIFO_PATH"; exec 3>&-' EXIT INT TERM
-
-# Initialize TUI
 ui_init
 
-# Bind temporary M-prefix keys for the popup session
-bind_sessionizer_keys
-
-# Main loop
 while true; do
     ui_render
 
-    # Read action from FIFO (1s timeout for periodic re-render)
-    action=""
-    IFS= read -r -t 1.0 action <&3 2>/dev/null || true
+    # Read a single key (500ms timeout for periodic re-render)
+    key=""
+    IFS= read -r -n1 -t 0.5 key 2>/dev/null || true
 
-    case "$action" in
-        "up")       ui_cursor_up || true ;;
-        "down")     ui_cursor_down || true ;;
-        "select")   ui_select || true ;;
-        "new")      ui_create_session || true ;;
-        "rename")   ui_rename_session || true ;;
-        "kill")     ui_kill_session || true ;;
-        "help")     ui_toggle_help || true ;;
-        "quit")     break ;;
-        "")         ;;  # timeout — re-render
-        *)          ;;  # ignore unknown
+    case "$key" in
+        $'\e')
+            # Escape sequence — read remaining bytes for arrow keys
+            c1=""; c2=""
+            IFS= read -r -t 0.05 -n1 c1 2>/dev/null || true
+            IFS= read -r -t 0.05 -n1 c2 2>/dev/null || true
+            case "$c1$c2" in
+                '[A') ui_cursor_up ;;
+                '[B') ui_cursor_down ;;
+                *)    break ;;  # standalone Escape = quit
+            esac
+            ;;
+        $'\n'|$'\r') ui_select ;;
+        n|c)  ui_create_session ;;
+        r)    ui_rename_session ;;
+        x)    ui_kill_session ;;
+        h)    ui_toggle_help ;;
+        q|Q)  break ;;
     esac
 done
