@@ -241,12 +241,7 @@ prompt_with_timeout() {
     local remaining=$timeout
 
     while [ $remaining -gt 0 ]; do
-        if [ $remaining -le 3 ]; then
-            echo -ne "\r${prompt} (closing in ${remaining}s): "
-        else
-            echo -ne "\r${prompt}: "
-        fi
-
+        echo -ne "\r${prompt}: "
         IFS= read -r -t 1 var_ref 2>/dev/null && return 0
         remaining=$((remaining - 1))
     done
@@ -259,7 +254,7 @@ prompt_with_timeout() {
 ui_create_session() {
     ui_cleanup
     local name=""
-    prompt_with_timeout "New session name (empty to cancel)" name 5
+    prompt_with_timeout "New session name (empty to cancel)" name 10
     [ -z "$name" ] && { ui_init; return; }
     session_create "$name"
     session_switch "$name"
@@ -271,7 +266,7 @@ ui_rename_session() {
         local old_name="${SESSIONS[$SELECTED]}"
         ui_cleanup
         local new_name=""
-        prompt_with_timeout "Rename '${old_name}' to (empty to cancel)" new_name 5
+        prompt_with_timeout "Rename '${old_name}' to (empty to cancel)" new_name 10
         [ -n "$new_name" ] && session_rename "$old_name" "$new_name"
         ui_init
     fi
@@ -282,7 +277,7 @@ ui_kill_session() {
         local name="${SESSIONS[$SELECTED]}"
         ui_cleanup
         local confirm=""
-        prompt_with_timeout "Kill '${name}'? (y/N)" confirm 5
+        prompt_with_timeout "Kill '${name}'? (y/N)" confirm 10
         if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
             session_kill "$name"
         fi
