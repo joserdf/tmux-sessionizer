@@ -77,7 +77,7 @@ _load_colors() {
 # ---- Init ----
 ui_init() {
     # Save terminal state
-    stty -echo -icanon -icrnl 2>/dev/null || true
+    stty -echo -icanon 2>/dev/null || true
     # Enter alternate screen
     tput smcup 2>/dev/null || true
     # Hide cursor

@@ -21,7 +21,7 @@ while true; do
 
     # Read a single key (500ms timeout for periodic re-render)
     key=""
-    IFS= read -r -n1 -t 0.5 key 2>/dev/null || true
+    IFS= read -r -N1 -t 0.5 key 2>/dev/null || true
 
     # Auto-close on inactivity timeout
     if [ -z "$key" ]; then
@@ -36,8 +36,8 @@ while true; do
         $'\e')
             # Escape sequence — read remaining bytes for arrow keys
             c1=""; c2=""
-            IFS= read -r -t 0.05 -n1 c1 2>/dev/null || true
-            IFS= read -r -t 0.05 -n1 c2 2>/dev/null || true
+            IFS= read -r -t 0.05 -N1 c1 2>/dev/null || true
+            IFS= read -r -t 0.05 -N1 c2 2>/dev/null || true
             case "$c1$c2" in
                 '[A') ui_cursor_up ;;
                 '[B') ui_cursor_down ;;
