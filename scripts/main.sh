@@ -27,7 +27,7 @@ while true; do
     # Auto-close on inactivity timeout
     if [ -z "$key" ]; then
         NOW=$(date +%s)
-        local timeout=$AUTO_CLOSE_TIMEOUT
+        timeout=$AUTO_CLOSE_TIMEOUT
         [ "$MODE" = "windows" ] && timeout=$WINDOW_AUTO_CLOSE_TIMEOUT
         [ $((NOW - LAST_ACTIVITY)) -ge $timeout ] && break
         continue
