@@ -230,15 +230,39 @@ ui_select() {
     fi
 }
 
+
+# ---- Timed Prompt ----
+# Reads input with timeout and countdown display
+# Args: prompt_text var_name timeout_seconds
+prompt_with_timeout() {
+    local prompt="$1"
+    local -n var_ref="$2"
+    local timeout="${3:-5}"
+    local remaining=$timeout
+
+    while [ $remaining -gt 0 ]; do
+        if [ $remaining -le 3 ]; then
+            echo -ne "\r${prompt} (closing in ${remaining}s): "
+        else
+            echo -ne "\r${prompt}: "
+        fi
+
+        IFS= read -r -t 1 var_ref 2>/dev/null && return 0
+        remaining=$((remaining - 1))
+    done
+
+    # Timeout expired
+    var_ref=''
+    return 1
+}
+
 ui_create_session() {
-    # End TUI so we can show prompt
     ui_cleanup
-    echo -n "New session name (leave empty for timestamp): "
-    read -r name
-    [ -z "$name" ] && name="session-$(date +%s)"
+    local name=""
+    prompt_with_timeout "New session name (empty to cancel)" name 5
+    [ -z "$name" ] && { ui_init; return; }
     session_create "$name"
     session_switch "$name"
-    # Re-enter TUI
     ui_init
 }
 
@@ -246,8 +270,8 @@ ui_rename_session() {
     if [ ${#SESSIONS[@]} -gt 0 ] && [ $SELECTED -lt ${#SESSIONS[@]} ]; then
         local old_name="${SESSIONS[$SELECTED]}"
         ui_cleanup
-        echo -n "Rename session '${old_name}' to: "
-        read -r new_name
+        local new_name=""
+        prompt_with_timeout "Rename '${old_name}' to (empty to cancel)" new_name 5
         [ -n "$new_name" ] && session_rename "$old_name" "$new_name"
         ui_init
     fi
@@ -257,8 +281,8 @@ ui_kill_session() {
     if [ ${#SESSIONS[@]} -gt 0 ] && [ $SELECTED -lt ${#SESSIONS[@]} ]; then
         local name="${SESSIONS[$SELECTED]}"
         ui_cleanup
-        echo -n "Kill session '${name}'? (y/N): "
-        read -r confirm
+        local confirm=""
+        prompt_with_timeout "Kill '${name}'? (y/N)" confirm 5
         if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
             session_kill "$name"
         fi
