@@ -12,12 +12,25 @@ trap 'sessionizer_cleanup' EXIT INT TERM
 
 ui_init
 
+# Auto-close: exit after N seconds of inactivity
+LAST_ACTIVITY=$(date +%s)
+AUTO_CLOSE_TIMEOUT=${SESSIONIZER_TIMEOUT:-5}
+
 while true; do
     ui_render
 
     # Read a single key (500ms timeout for periodic re-render)
     key=""
     IFS= read -r -n1 -t 0.5 key 2>/dev/null || true
+
+    # Auto-close on inactivity timeout
+    if [ -z "$key" ]; then
+        NOW=$(date +%s)
+        [ $((NOW - LAST_ACTIVITY)) -ge $AUTO_CLOSE_TIMEOUT ] && break
+        continue
+    fi
+
+    LAST_ACTIVITY=$(date +%s)
 
     case "$key" in
         $'\e')
