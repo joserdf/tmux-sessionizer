@@ -29,3 +29,20 @@ window_preview() {
     done <<< "$(window_list "$session")"
     echo "${preview# }"  # Remove leading space
 }
+
+# Get active window name for a session
+# Args: session_name
+# Returns: "index:name" of the active window
+window_active_name() {
+    local session="$1"
+    tmux list-windows -t "$session" -F '#{window_index}|#{window_name}|#{window_active}' 2>/dev/null |         grep '|1$' | cut -d'|' -f1,2 || true
+}
+
+# Capture last N lines from the active pane of a session
+# Args: session_name, max_lines
+# Returns: plain text lines stripped of trailing blanks
+window_capture_preview() {
+    local session="$1"
+    local max_lines="$2"
+    tmux capture-pane -t "$session" -p -S -"${max_lines}" -J 2>/dev/null || true
+}
