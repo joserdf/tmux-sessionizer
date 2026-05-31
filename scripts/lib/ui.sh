@@ -129,7 +129,7 @@ ui_draw_header() {
 
 ui_draw_session_list() {
     local start_row=2
-    local max_visible=$(( TERM_ROWS - 11 ))  # Leave space for header, preview, status
+    local max_visible=$(( TERM_ROWS - 7 ))  # Leave space for header, preview, status
     local scroll=0
 
     # Calculate scroll offset
@@ -165,17 +165,14 @@ ui_draw_session_list() {
 }
 
 ui_draw_preview() {
-    local sep_row=$(( TERM_ROWS - 8 ))
-    local header_row=$(( sep_row + 1 ))
-    local content_start=$(( header_row + 1 ))
-    local num_lines=$(( TERM_ROWS - 2 - content_start ))  # lines available for content
+    local sep_row=$(( TERM_ROWS - 6 ))
+    local header_row=$(( sep_row + 1 ))          # TERM_ROWS - 5
+    local tree_row=$(( header_row + 1 ))         # TERM_ROWS - 4
+    local content_start=$(( tree_row + 1 ))      # TERM_ROWS - 3
+    local num_content_lines=$(( TERM_ROWS - 2 - content_start ))  # 2 lines for 24-row term
 
-    # Draw separator
-    tput cup $sep_row 0 2>/dev/null || true
-    printf '%*s' "$TERM_COLS" '' | tr ' ' '─' 2>/dev/null || true
-
-    # Clear entire preview area first
-    local r=$header_row
+    # Clear entire preview area
+    local r=$sep_row
     while [ $r -lt $(( TERM_ROWS - 1 )) ]; do
         tput cup $r 0 2>/dev/null || true
         echo -n "${C_CLR}"
@@ -189,121 +186,77 @@ ui_draw_preview() {
     fi
 
     local name="${SESSIONS[$SELECTED]}"
-    local sep=" | "
-    local col_width=$(( (TERM_COLS - ${#sep} * 2) / 3 ))
-    local cap=$(( num_lines + 3 ))  # capture a few extra lines
+    local winlist
+    winlist=$(window_list "$name" 2>/dev/null || true)
+    local win_count
+    win_count=$(echo "$winlist" | grep -c . || true)
 
-    # Get first 3 windows: idx|name|active
-    local wins=()
+    # Draw separator
+    tput cup $sep_row 0 2>/dev/null || true
+    printf '%*s' "$TERM_COLS" '' | tr ' ' '─' 2>/dev/null || true
+
+    # Preview header: Session name + window count
+    tput cup $header_row 0 2>/dev/null || true
+    echo -n "${C_CLR}${C_TITLE}Session: ${C_BOLD}${name}${C_RESET}  ${C_SELECT}[${win_count} windows]${C_RESET}"
+
+    # Draw window tree line at tree_row
+    tput cup $tree_row 0 2>/dev/null || true
+
+    # Collect windows and format as: "├─ 0: btop*  └─ 1: vim" (compact single line)
+    local tree_parts=()
     local wcount=0
     while IFS='|' read -r widx wname active; do
         [ -z "$widx" ] && continue
-        wins+=("${widx}|${wname}|${active}")
         wcount=$(( wcount + 1 ))
-        [ $wcount -ge 3 ] && break
-    done <<< "$(window_list "$name")"
+        local prefix
+        # We'll determine after we know total count
+        tree_parts+=("${widx}|${wname}|${active}")
+    done <<< "$winlist"
 
-    [ $wcount -eq 0 ] && return
+    local tree_line=""
+    local idx=0
+    for entry in "${tree_parts[@]}"; do
+        idx=$(( idx + 1 ))
+        local widx="${entry%%|*}"
+        local rest="${entry#*|}"
+        local wname="${rest%|*}"
+        local active="${rest##*|}"
 
-    # --- Draw column headers (row = header_row) ---
-    tput cup $header_row 0 2>/dev/null || true
-    local header_line=""
-    for ((i = 0; i < wcount; i++)); do
-        local win_entry="${wins[$i]}"
-        local widx=$(echo "$win_entry" | cut -d'|' -f1)
-        local wname=$(echo "$win_entry" | cut -d'|' -f2)
-        local wactive=$(echo "$win_entry" | cut -d'|' -f3)
+        local prefix="├─"
+        [ "$idx" -eq "$wcount" ] && prefix="└─"
 
-        local label="${widx}:${wname}"
-        [ "$wactive" = "1" ] && label="${label}*"
+        local suffix=""
+        [ "$active" = "1" ] && suffix="*"
 
-        # Colored label
-        local style="${C_CLR}${C_BOLD}${C_CYAN}${label}${C_RESET}"
-
-        # Pad to col_width (label may have color codes, approximate)
-        local plain_len=$(( ${#widx} + 1 + ${#wname} ))
-        [ "$wactive" = "1" ] && plain_len=$(( plain_len + 1 ))
-
-        local pad=$(( col_width - plain_len ))
-        [ $pad -lt 0 ] && pad=0
-        local left_pad=$(( pad / 2 ))
-        local right_pad=$(( pad - left_pad ))
-
-        if [ "$i" -gt 0 ]; then
-            header_line="${header_line}${sep}"
+        local part="${prefix} ${widx}:${wname}${suffix}"
+        if [ -n "$tree_line" ]; then
+            tree_line="${tree_line}  ${part}"
+        else
+            tree_line="${part}"
         fi
-        header_line="${header_line}$(printf '%*s' $left_pad '')${style}$(printf '%*s' $right_pad '')"
-    done
-    echo -n "${header_line}"
-
-    # --- Capture content for each window ---
-    local cap_wins=()
-    for ((i = 0; i < wcount; i++)); do
-        local win_entry="${wins[$i]}"
-        local widx=$(echo "$win_entry" | cut -d'|' -f1)
-        local captured
-        captured=$(window_capture_specific "$name" "$widx" "$cap" 2>/dev/null || true)
-        # Trim trailing blanks
-        if [ -n "$captured" ]; then
-            captured=$(echo "$captured" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba}' || true)
-        fi
-        cap_wins[$i]="$captured"
     done
 
-    # --- Draw content lines side by side ---
-    # Pre-count lines per window
-    local line_counts=()
-    local starts=()
-    for ((i = 0; i < wcount; i++)); do
-        local captured="${cap_wins[$i]}"
-        local total=0
-        if [ -n "$captured" ]; then
-            total=$(echo "$captured" | wc -l)
-        fi
-        line_counts[$i]=$total
-        local s=$(( total - num_lines ))
-        [ $s -lt 1 ] && s=1
-        starts[$i]=$s
-    done
+    echo -n "${C_CLR}${C_PREVIEW}${tree_line}${C_RESET}"
 
-    local line_idx=0
-    local done=false
-    while [ $line_idx -lt $num_lines ] && [ "$done" = false ]; do
-        tput cup $(( content_start + line_idx )) 0 2>/dev/null || true
-        local row_line=""
-        local any_data=false
+    # Draw live content from pipe
+    local content_lines=()
+    local content_chunk
+    content_chunk=$(window_preview_get_content "$num_content_lines" 2>/dev/null || true)
+    if [ -n "$content_chunk" ]; then
+        while IFS= read -r line; do
+            content_lines+=("$line")
+        done <<< "$content_chunk"
+    fi
 
-        for ((i = 0; i < wcount; i++)); do
-            local captured="${cap_wins[$i]}"
-            local total=${line_counts[$i]}
-            local start=${starts[$i]}
-            local src=$(( start + line_idx ))
-
-            local text=""
-            if [ -n "$captured" ] && [ $src -le $total ]; then
-                text=$(echo "$captured" | sed -n "${src}p" || true)
-                any_data=true
-            fi
-
-            # Format: truncate to col_width and right-pad
-            local truncated="${text:0:$col_width}"
-            local tlen=${#truncated}
-            local pad=$(( col_width - tlen ))
-            [ $pad -lt 0 ] && pad=0
-
-            if [ "$i" -gt 0 ]; then
-                row_line="${row_line}${sep}"
-            fi
-            row_line="${row_line}${C_CLR}${truncated}$(printf '%*s' $pad '')"
-        done
-
-        echo -n "${row_line}"
-        line_idx=$(( line_idx + 1 ))
-
-        # Stop if all columns have no data and we've shown at least 1 row
-        if [ "$any_data" = false ] && [ $line_idx -gt 1 ]; then
-            break
-        fi
+    local line_row=$content_start
+    for (( i = 0; i < num_content_lines; i++ )); do
+        tput cup $line_row 0 2>/dev/null || true
+        local text=""
+        [ $i -lt ${#content_lines[@]} ] && text="${content_lines[$i]}"
+        # Truncate to terminal width
+        text="${text:0:$TERM_COLS}"
+        echo -n "${C_CLR}${text}"
+        line_row=$(( line_row + 1 ))
     done
 }
 

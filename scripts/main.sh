@@ -8,15 +8,30 @@ source "$SESSIONIZER_DIR/scripts/lib/sessions.sh"
 source "$SESSIONIZER_DIR/scripts/lib/windows.sh"
 source "$SESSIONIZER_DIR/scripts/lib/ui.sh"
 
-trap 'sessionizer_cleanup' EXIT INT TERM
+trap 'sessionizer_cleanup; window_preview_cleanup' EXIT INT TERM
 
 ui_init
+
+# Initialize pipe preview for the first session
+PREVIEW_SESSION=""
+window_preview_init
+if [ ${#SESSIONS[@]} -gt 0 ]; then
+    PREVIEW_SESSION="${SESSIONS[0]}"
+    window_preview_session "$PREVIEW_SESSION"
+fi
 
 # Auto-close: exit after N seconds of inactivity
 LAST_ACTIVITY=$(date +%s)
 AUTO_CLOSE_TIMEOUT=${SESSIONIZER_TIMEOUT:-5}
 
 while true; do
+    # Check if selected session changed -> update pipe preview
+    current_session="${SESSIONS[$SELECTED]:-}"
+    if [ "$current_session" != "$PREVIEW_SESSION" ]; then
+        PREVIEW_SESSION="$current_session"
+        window_preview_session "$PREVIEW_SESSION"
+    fi
+
     ui_render
 
     # Read a single key (500ms timeout for periodic re-render)
