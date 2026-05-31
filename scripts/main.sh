@@ -51,4 +51,5 @@ while true; do
         h)    ui_toggle_help ;;
         q|Q)  break ;;
     esac
+    LAST_ACTIVITY=$(date +%s)
 done
