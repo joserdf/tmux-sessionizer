@@ -35,6 +35,30 @@ while true; do
 
     LAST_ACTIVITY=$(date +%s)
 
+    # Edit mode - intercept all keys when editing inline
+    if [ "$EDIT_MODE" != "none" ]; then
+        case "$EDIT_MODE" in
+            rename|create|rename_window)
+                case "$key" in
+                    $'\e')  ui_edit_cancel ;;
+                    $'\n'|$'\r')  ui_edit_commit ;;
+                    $'\177'|$'\b')  EDIT_TEXT="${EDIT_TEXT%?}" ;;
+                    *)
+                        # Accept printable ASCII characters only
+                        [ ${#EDIT_TEXT} -lt 64 ] && EDIT_TEXT+="$key"
+                        ;;
+                esac
+                ;;
+            kill_confirm|kill_window_confirm)
+                case "$key" in
+                    y|Y)  ui_edit_commit ;;
+                    *)    ui_edit_cancel ;;
+                esac
+                ;;
+        esac
+        continue
+    fi
+
     # Route by mode
     case "$MODE" in
         sessions)
@@ -82,6 +106,8 @@ while true; do
                     esac
                     ;;
                 $'\n'|$'\r'|' ') ui_window_select ;;
+                r)    ui_window_rename ;;
+                x)    ui_window_kill ;;
                 h)    ui_toggle_help ;;
                 q|Q)  break ;;
             esac

@@ -44,6 +44,10 @@ MODE="sessions"    # "sessions" or "windows"
 WIN_SELECTED=0     # Selected window index in window mode
 WINDOWS=()         # Array of "index|name|active" for current session's windows
 
+# Inline editing state
+EDIT_MODE="none"    # "none", "rename", "create", "kill_confirm", "rename_window", "kill_window_confirm"
+EDIT_TEXT=""
+
 # ---- Color Customization ----
 # Load colors from tmux @sessionizer_color_* options
 _load_color() {
@@ -113,6 +117,10 @@ ui_refresh_sessions() {
         SESSION_DATA+=("$name|$windows|$created")
     done < <(session_list)
 
+    # Virtual "New session" item at end of list
+    SESSIONS+=("+ New session")
+    SESSION_DATA+=("+|0|")
+
     # Clamp selection
     [ ${#SESSIONS[@]} -eq 0 ] && SELECTED=0
     [ $SELECTED -ge ${#SESSIONS[@]} ] && SELECTED=$(( ${#SESSIONS[@]} - 1 ))
@@ -156,7 +164,11 @@ ui_draw_session_list() {
         fi
 
         if [ $i -eq $SELECTED ]; then
-            echo -n "${C_CLR}${C_REVERSE} ${C_BOLD}> ${name}${C_RESET}  ${C_SELECT}[${win_count} windows]${C_RESET}"
+            if [ "$EDIT_MODE" = "rename" ] || { [ "$EDIT_MODE" = "create" ] && [ "$name" = "+ New session" ]; }; then
+                echo -n "${C_CLR}${C_REVERSE} ${C_BOLD}> ${EDIT_TEXT}_${C_RESET}"
+            else
+                echo -n "${C_CLR}${C_REVERSE} ${C_BOLD}> ${name}${C_RESET}  ${C_SELECT}[${win_count} windows]${C_RESET}"
+            fi
         else
             echo -n "${C_CLR}   ${name}  ${C_BLUE}[${win_count} windows]${C_RESET}"
         fi
@@ -173,11 +185,35 @@ ui_draw_status() {
     local status_row=$(( TERM_ROWS - 1 ))
     tput cup $status_row 0 2>/dev/null || true
 
+    # Edit mode status
+    case "$EDIT_MODE" in
+        rename)
+            echo -n "${C_CLR}${C_RESET}${C_YELLOW}RENAME: ${EDIT_TEXT}_${C_RESET}  ${C_BOLD}Enter${C_RESET}:ok  ${C_BOLD}Esc${C_RESET}:cancel"
+            return
+            ;;
+        create)
+            echo -n "${C_CLR}${C_RESET}${C_GREEN}NEW: ${EDIT_TEXT}_${C_RESET}  ${C_BOLD}Enter${C_RESET}:ok  ${C_BOLD}Esc${C_RESET}:cancel"
+            return
+            ;;
+        kill_confirm)
+            echo -n "${C_CLR}${C_RESET}${C_RED}Kill '${EDIT_TEXT}'? (y/N)${C_RESET}"
+            return
+            ;;
+        rename_window)
+            echo -n "${C_CLR}${C_RESET}${C_YELLOW}RENAME WINDOW: ${EDIT_TEXT}_${C_RESET}  ${C_BOLD}Enter${C_RESET}:ok  ${C_BOLD}Esc${C_RESET}:cancel"
+            return
+            ;;
+        kill_window_confirm)
+            echo -n "${C_CLR}${C_RESET}${C_RED}Kill window '${EDIT_TEXT}'? (y/N)${C_RESET}"
+            return
+            ;;
+    esac
+
     if [ "$MODE" = "windows" ]; then
         if [ "$HELP_VISIBLE" = true ]; then
-            echo -n "${C_CLR}${C_RESET}${C_BOLD}HELP${C_RESET}  ${C_CYAN}↑↓${C_RESET}:navigate  ${C_BOLD}Enter${C_RESET}:open  ${C_YELLOW}←${C_RESET}:back  ${C_YELLOW}h${C_RESET}:hide  ${C_BOLD}q${C_RESET}:quit"
+            echo -n "${C_CLR}${C_RESET}${C_BOLD}HELP${C_RESET}  ${C_CYAN}↑↓${C_RESET}:navigate  ${C_BOLD}Enter${C_RESET}:open  ${C_GREEN}r${C_RESET}:rename  ${C_RED}x${C_RESET}:kill  ${C_YELLOW}←${C_RESET}:back  ${C_YELLOW}h${C_RESET}:hide  ${C_BOLD}q${C_RESET}:quit"
         else
-            echo -n "${C_CLR}${C_RESET}${C_BOLD}↑↓${C_RESET}:navigate  ${C_BOLD}Enter${C_RESET}:open  ${C_YELLOW}←${C_RESET}:back  ${C_YELLOW}h${C_RESET}:help  ${C_BOLD}q${C_RESET}:quit"
+            echo -n "${C_CLR}${C_RESET}${C_BOLD}↑↓${C_RESET}:navigate  ${C_BOLD}Enter${C_RESET}:open  ${C_BOLD}r${C_RESET}:rename  ${C_BOLD}x${C_RESET}:kill  ${C_YELLOW}←${C_RESET}:back  ${C_YELLOW}h${C_RESET}:help  ${C_BOLD}q${C_RESET}:quit"
         fi
     else
         if [ "$HELP_VISIBLE" = true ]; then
@@ -316,6 +352,10 @@ ui_window_select() {
 ui_select() {
     if [ ${#SESSIONS[@]} -gt 0 ] && [ $SELECTED -lt ${#SESSIONS[@]} ]; then
         local name="${SESSIONS[$SELECTED]}"
+        if [ "$name" = "+ New session" ]; then
+            ui_create_session
+            return
+        fi
         session_switch "$name"
         exit 0
     fi
@@ -323,36 +363,48 @@ ui_select() {
 
 
 ui_create_session() {
-    ui_cleanup
-    echo -n "New session name (empty for timestamp): "
-    read -r name
-    [ -z "$name" ] && name="session-$(date +%s)"
-    session_create "$name"
-    session_switch "$name"
-    ui_init
+    EDIT_MODE="create"
+    EDIT_TEXT="session-$(date +%s)"
 }
 
 ui_rename_session() {
     if [ ${#SESSIONS[@]} -gt 0 ] && [ $SELECTED -lt ${#SESSIONS[@]} ]; then
-        local old_name="${SESSIONS[$SELECTED]}"
-        ui_cleanup
-        echo -n "Rename session '${old_name}' to: "
-        read -r new_name
-        [ -n "$new_name" ] && session_rename "$old_name" "$new_name"
-        ui_init
+        local name="${SESSIONS[$SELECTED]}"
+        if [ "$name" != "+ New session" ]; then
+            EDIT_MODE="rename"
+            EDIT_TEXT="$name"
+        fi
     fi
 }
 
 ui_kill_session() {
     if [ ${#SESSIONS[@]} -gt 0 ] && [ $SELECTED -lt ${#SESSIONS[@]} ]; then
         local name="${SESSIONS[$SELECTED]}"
-        ui_cleanup
-        echo -n "Kill session '${name}'? (y/N): "
-        read -r confirm
-        if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-            session_kill "$name"
+        if [ "$name" != "+ New session" ]; then
+            EDIT_MODE="kill_confirm"
+            EDIT_TEXT="$name"
         fi
-        ui_init
+    fi
+}
+
+# ---- Window Inline Actions ----
+ui_window_rename() {
+    if [ ${#WINDOWS[@]} -gt 0 ] && [ $WIN_SELECTED -lt ${#WINDOWS[@]} ]; then
+        local entry="${WINDOWS[$WIN_SELECTED]}"
+        local rest="${entry#*|}"
+        local wname="${rest%|*}"
+        EDIT_MODE="rename_window"
+        EDIT_TEXT="$wname"
+    fi
+}
+
+ui_window_kill() {
+    if [ ${#WINDOWS[@]} -gt 0 ] && [ $WIN_SELECTED -lt ${#WINDOWS[@]} ]; then
+        local entry="${WINDOWS[$WIN_SELECTED]}"
+        local rest="${entry#*|}"
+        local wname="${rest%|*}"
+        EDIT_MODE="kill_window_confirm"
+        EDIT_TEXT="$wname"
     fi
 }
 
@@ -362,4 +414,59 @@ ui_toggle_help() {
     else
         HELP_VISIBLE=true
     fi
+}
+
+# ---- Inline Edit Actions ----
+ui_edit_commit() {
+    local mode="$EDIT_MODE"
+    local text="$EDIT_TEXT"
+    EDIT_MODE="none"
+    EDIT_TEXT=""
+
+    case "$mode" in
+        create)
+            [ -n "$text" ] && session_create "$text" || true
+            ui_refresh_sessions
+            # Move selection to the new session (second to last)
+            [ ${#SESSIONS[@]} -ge 2 ] && SELECTED=$(( ${#SESSIONS[@]} - 2 ))
+            ;;
+        rename)
+            local old_name="${SESSIONS[$SELECTED]}"
+            if [ -n "$text" ] && [ "$old_name" != "+ New session" ]; then
+                session_rename "$old_name" "$text" || true
+            fi
+            ui_refresh_sessions
+            ;;
+        kill_confirm)
+            if [ -n "$text" ] && [ "$text" != "+ New session" ]; then
+                session_kill "$text" || true
+            fi
+            ui_refresh_sessions
+            [ $SELECTED -ge ${#SESSIONS[@]} ] && SELECTED=$(( ${#SESSIONS[@]} - 1 ))
+            [ $SELECTED -lt 0 ] && SELECTED=0
+            ;;
+        rename_window)
+            local session="${SESSIONS[$SELECTED]}"
+            local entry="${WINDOWS[$WIN_SELECTED]}"
+            local widx="${entry%%|*}"
+            if [ -n "$text" ]; then
+                tmux rename-window -t "${session}:${widx}" "$text" 2>/dev/null || true
+            fi
+            ui_refresh_windows
+            ;;
+        kill_window_confirm)
+            local session="${SESSIONS[$SELECTED]}"
+            local entry="${WINDOWS[$WIN_SELECTED]}"
+            local widx="${entry%%|*}"
+            tmux kill-window -t "${session}:${widx}" 2>/dev/null || true
+            ui_refresh_windows
+            [ $WIN_SELECTED -ge ${#WINDOWS[@]} ] && WIN_SELECTED=$(( ${#WINDOWS[@]} - 1 ))
+            [ $WIN_SELECTED -lt 0 ] && WIN_SELECTED=0
+            ;;
+    esac
+}
+
+ui_edit_cancel() {
+    EDIT_MODE="none"
+    EDIT_TEXT=""
 }
