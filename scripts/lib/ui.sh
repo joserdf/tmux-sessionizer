@@ -129,7 +129,7 @@ ui_draw_header() {
 
 ui_draw_session_list() {
     local start_row=2
-    local max_visible=$(( TERM_ROWS - 5 ))  # Leave space for header, preview, status
+    local max_visible=$(( TERM_ROWS - 7 ))  # Leave space for header, preview, status
     local scroll=0
 
     # Calculate scroll offset
@@ -165,24 +165,70 @@ ui_draw_session_list() {
 }
 
 ui_draw_preview() {
-    local preview_row=$(( TERM_ROWS - 4 ))
+    local sep_row=$(( TERM_ROWS - 5 ))
+    local header_row=$(( sep_row + 1 ))
 
     # Draw separator
-    tput cup $preview_row 0 2>/dev/null || true
+    tput cup $sep_row 0 2>/dev/null || true
     printf '%*s' "$TERM_COLS" '' | tr ' ' '─' 2>/dev/null || true
 
-    # Draw preview content
-    local content_row=$(( preview_row + 1 ))
-    tput cup $content_row 0 2>/dev/null || true
-
+    # Draw session header
+    tput cup $header_row 0 2>/dev/null || true
     if [ ${#SESSIONS[@]} -gt 0 ] && [ $SELECTED -lt ${#SESSIONS[@]} ]; then
         local name="${SESSIONS[$SELECTED]}"
-        local preview=$(window_preview "$name")
         local win_count=$(window_count "$name")
-        echo -n "${C_CLR}${C_BOLD}${C_PREVIEW} ${name}${C_RESET}  ${C_CYAN}${win_count} windows:${C_RESET}  ${preview}"
+        echo -n "${C_CLR}${C_BOLD}${C_PREVIEW} ${name}${C_RESET}  ${C_CYAN}(${win_count} windows)${C_RESET}"
     else
         echo -n "${C_CLR}${C_YELLOW} No sessions${C_RESET}"
+        # Clear remaining preview lines
+        local r=$(( header_row + 1 ))
+        while [ $r -lt $(( TERM_ROWS - 1 )) ]; do
+            tput cup $r 0 2>/dev/null || true
+            echo -n "${C_CLR}"
+            r=$(( r + 1 ))
+        done
+        return
     fi
+
+    # Draw windows in tree format
+    local max_win_lines=$(( TERM_ROWS - 1 - header_row - 1 ))  # lines between header and status
+    local total_wins=0
+    while IFS='|' read -r idx wname active; do
+        [ -z "$idx" ] && continue
+        total_wins=$(( total_wins + 1 ))
+    done <<< "$(window_list "$name")"
+
+    local win_row=$(( header_row + 1 ))
+    local win_idx=0
+    while IFS='|' read -r idx wname active; do
+        [ -z "$idx" ] && continue
+        win_idx=$(( win_idx + 1 ))
+        if [ $win_idx -le $max_win_lines ]; then
+            tput cup $win_row 0 2>/dev/null || true
+            local prefix="├─"
+            local suffix=""
+            if [ $win_idx -eq $max_win_lines ] && [ $win_idx -lt $total_wins ]; then
+                # Last display line but more windows exist
+                prefix="└─"
+                suffix="  ${C_CYAN}(+$(( total_wins - win_idx )) more)${C_RESET}"
+            elif [ $win_idx -eq $total_wins ] || [ $win_idx -eq $max_win_lines ]; then
+                prefix="└─"
+            fi
+            if [ "$active" = "1" ]; then
+                echo -n "${C_CLR}${prefix} ${idx}:${wname}*${suffix}${C_RESET}"
+            else
+                echo -n "${C_CLR}${prefix} ${idx}:${wname}${suffix}${C_RESET}"
+            fi
+            win_row=$(( win_row + 1 ))
+        fi
+    done <<< "$(window_list "$name")"
+
+    # Clear remaining preview lines
+    while [ $win_row -lt $(( TERM_ROWS - 1 )) ]; do
+        tput cup $win_row 0 2>/dev/null || true
+        echo -n "${C_CLR}"
+        win_row=$(( win_row + 1 ))
+    done
 }
 
 ui_draw_status() {
