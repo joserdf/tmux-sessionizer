@@ -46,3 +46,12 @@ window_capture_preview() {
     local max_lines="$2"
     tmux capture-pane -t "$session" -p -S -"${max_lines}" -J 2>/dev/null || true
 }
+
+# Capture last N lines from a specific window in a session
+# Args: session_name, window_index, max_lines
+window_capture_specific() {
+    local session="$1"
+    local window="$2"
+    local max_lines="$3"
+    tmux capture-pane -t "${session}:${window}" -p -S -"${max_lines}" -J 2>/dev/null || true
+}
