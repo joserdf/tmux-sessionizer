@@ -44,7 +44,7 @@ while true; do
                 *)    break ;;  # standalone Escape = quit
             esac
             ;;
-        $'\n'|$'\r') ui_select ;;
+        $'\n'|$'\r'|' ') ui_select ;;
         n|c)  ui_create_session ;;
         r)    ui_rename_session ;;
         x)    ui_kill_session ;;
