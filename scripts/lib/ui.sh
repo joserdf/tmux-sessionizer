@@ -80,6 +80,8 @@ ui_init() {
     stty -echo -icanon 2>/dev/null || true
     # Enter alternate screen
     tput smcup 2>/dev/null || true
+    # Clear alternate screen
+    tput clear 2>/dev/null || true
     # Hide cursor
     tput civis 2>/dev/null || true
 
@@ -208,6 +210,7 @@ ui_render() {
 # then ui_init to re-enter TUI mode.
 ui_cleanup() {
     stty echo icanon 2>/dev/null || true
+    tput clear 2>/dev/null || true
     tput cnorm 2>/dev/null || true
     tput rmcup 2>/dev/null || true
     tput sgr0 2>/dev/null || true
