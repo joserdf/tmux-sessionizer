@@ -40,6 +40,10 @@ HELP_VISIBLE=false # Whether help is shown
 TERM_ROWS=24       # Terminal height
 TERM_COLS=80       # Terminal width
 
+MODE="sessions"    # "sessions" or "windows"
+WIN_SELECTED=0     # Selected window index in window mode
+WINDOWS=()         # Array of "index|name|active" for current session's windows
+
 # ---- Color Customization ----
 # Load colors from tmux @sessionizer_color_* options
 _load_color() {
@@ -129,7 +133,7 @@ ui_draw_header() {
 
 ui_draw_session_list() {
     local start_row=2
-    local max_visible=$(( TERM_ROWS - 7 ))  # Leave space for header, preview, status
+    local max_visible=$(( TERM_ROWS - 3 ))  # Leave space for header + separator + status
     local scroll=0
 
     # Calculate scroll offset
@@ -164,118 +168,35 @@ ui_draw_session_list() {
     echo -n "${C_CLR}"
 }
 
-ui_draw_preview() {
-    local sep_row=$(( TERM_ROWS - 6 ))
-    local header_row=$(( sep_row + 1 ))          # TERM_ROWS - 5
-    local tree_row=$(( header_row + 1 ))         # TERM_ROWS - 4
-    local content_start=$(( tree_row + 1 ))      # TERM_ROWS - 3
-    local num_content_lines=$(( TERM_ROWS - 2 - content_start ))  # 2 lines for 24-row term
-
-    # Clear entire preview area
-    local r=$sep_row
-    while [ $r -lt $(( TERM_ROWS - 1 )) ]; do
-        tput cup $r 0 2>/dev/null || true
-        echo -n "${C_CLR}"
-        r=$(( r + 1 ))
-    done
-
-    if [ ${#SESSIONS[@]} -eq 0 ] || [ $SELECTED -ge ${#SESSIONS[@]} ]; then
-        tput cup $header_row 0 2>/dev/null || true
-        echo -n "${C_CLR}${C_YELLOW} No sessions${C_RESET}"
-        return
-    fi
-
-    local name="${SESSIONS[$SELECTED]}"
-    local winlist
-    winlist=$(window_list "$name" 2>/dev/null || true)
-    local win_count
-    win_count=$(echo "$winlist" | grep -c . || true)
-
-    # Draw separator
-    tput cup $sep_row 0 2>/dev/null || true
-    printf '%*s' "$TERM_COLS" '' | tr ' ' '─' 2>/dev/null || true
-
-    # Preview header: Session name + window count
-    tput cup $header_row 0 2>/dev/null || true
-    echo -n "${C_CLR}${C_TITLE}Session: ${C_BOLD}${name}${C_RESET}  ${C_SELECT}[${win_count} windows]${C_RESET}"
-
-    # Draw window tree line at tree_row
-    tput cup $tree_row 0 2>/dev/null || true
-
-    # Collect windows and format as: "├─ 0: btop*  └─ 1: vim" (compact single line)
-    local tree_parts=()
-    local wcount=0
-    while IFS='|' read -r widx wname active; do
-        [ -z "$widx" ] && continue
-        wcount=$(( wcount + 1 ))
-        local prefix
-        # We'll determine after we know total count
-        tree_parts+=("${widx}|${wname}|${active}")
-    done <<< "$winlist"
-
-    local tree_line=""
-    local idx=0
-    for entry in "${tree_parts[@]}"; do
-        idx=$(( idx + 1 ))
-        local widx="${entry%%|*}"
-        local rest="${entry#*|}"
-        local wname="${rest%|*}"
-        local active="${rest##*|}"
-
-        local prefix="├─"
-        [ "$idx" -eq "$wcount" ] && prefix="└─"
-
-        local suffix=""
-        [ "$active" = "1" ] && suffix="*"
-
-        local part="${prefix} ${widx}:${wname}${suffix}"
-        if [ -n "$tree_line" ]; then
-            tree_line="${tree_line}  ${part}"
-        else
-            tree_line="${part}"
-        fi
-    done
-
-    echo -n "${C_CLR}${C_PREVIEW}${tree_line}${C_RESET}"
-
-    # Draw live content from pipe
-    local content_lines=()
-    local content_chunk
-    content_chunk=$(window_preview_get_content "$num_content_lines" 2>/dev/null || true)
-    if [ -n "$content_chunk" ]; then
-        while IFS= read -r line; do
-            content_lines+=("$line")
-        done <<< "$content_chunk"
-    fi
-
-    local line_row=$content_start
-    for (( i = 0; i < num_content_lines; i++ )); do
-        tput cup $line_row 0 2>/dev/null || true
-        local text=""
-        [ $i -lt ${#content_lines[@]} ] && text="${content_lines[$i]}"
-        # Truncate to terminal width
-        text="${text:0:$TERM_COLS}"
-        echo -n "${C_CLR}${text}"
-        line_row=$(( line_row + 1 ))
-    done
-}
 
 ui_draw_status() {
     local status_row=$(( TERM_ROWS - 1 ))
     tput cup $status_row 0 2>/dev/null || true
 
-    if [ "$HELP_VISIBLE" = true ]; then
-        echo -n "${C_CLR}${C_RESET}${C_BOLD}HELP${C_RESET}  ${C_CYAN}n${C_RESET}:new  ${C_GREEN}r${C_RESET}:rename  ${C_RED}x${C_RESET}:kill  ${C_BOLD}Enter${C_RESET}:switch  ${C_YELLOW}h${C_RESET}:hide help  ${C_BOLD}q${C_RESET}:quit"
+    if [ "$MODE" = "windows" ]; then
+        if [ "$HELP_VISIBLE" = true ]; then
+            echo -n "${C_CLR}${C_RESET}${C_BOLD}HELP${C_RESET}  ${C_CYAN}↑↓${C_RESET}:navigate  ${C_BOLD}Enter${C_RESET}:open  ${C_YELLOW}←${C_RESET}:back  ${C_YELLOW}h${C_RESET}:hide  ${C_BOLD}q${C_RESET}:quit"
+        else
+            echo -n "${C_CLR}${C_RESET}${C_BOLD}↑↓${C_RESET}:navigate  ${C_BOLD}Enter${C_RESET}:open  ${C_YELLOW}←${C_RESET}:back  ${C_YELLOW}h${C_RESET}:help  ${C_BOLD}q${C_RESET}:quit"
+        fi
     else
-        echo -n "${C_CLR}${C_RESET}${C_BOLD}n${C_RESET}:new  ${C_BOLD}r${C_RESET}:rename  ${C_BOLD}x${C_RESET}:kill  ${C_BOLD}Enter${C_RESET}:switch  ${C_YELLOW}h${C_RESET}:help  ${C_BOLD}q${C_RESET}:quit"
+        if [ "$HELP_VISIBLE" = true ]; then
+            echo -n "${C_CLR}${C_RESET}${C_BOLD}HELP${C_RESET}  ${C_CYAN}n${C_RESET}:new  ${C_GREEN}r${C_RESET}:rename  ${C_RED}x${C_RESET}:kill  ${C_BOLD}Enter${C_RESET}:switch  ${C_YELLOW}h${C_RESET}:hide help  ${C_BOLD}q${C_RESET}:quit"
+        else
+            echo -n "${C_CLR}${C_RESET}${C_BOLD}n${C_RESET}:new  ${C_BOLD}r${C_RESET}:rename  ${C_BOLD}x${C_RESET}:kill  ${C_BOLD}Enter${C_RESET}:switch  ${C_YELLOW}h${C_RESET}:help  ${C_BOLD}q${C_RESET}:quit"
+        fi
     fi
 }
 
 ui_render() {
     ui_update_size
-    ui_draw_header
-    ui_draw_session_list
-    ui_draw_preview
+    if [ "$MODE" = "sessions" ]; then
+        ui_draw_header
+        ui_draw_session_list
+    else
+        ui_draw_window_header
+        ui_draw_window_list
+    fi
     ui_draw_status
 }
 
@@ -298,6 +219,83 @@ ui_cursor_up() {
 
 ui_cursor_down() {
     [ $SELECTED -lt $(( ${#SESSIONS[@]} - 1 )) ] && SELECTED=$(( SELECTED + 1 )) || true
+}
+
+# ---- Window Mode ----
+ui_refresh_windows() {
+    WINDOWS=()
+    local session="${SESSIONS[$SELECTED]:-}"
+    [ -z "$session" ] && return
+    while IFS='|' read -r idx name active; do
+        [ -z "$idx" ] && continue
+        WINDOWS+=("${idx}|${name}|${active}")
+    done <<< "$(window_list "$session")"
+}
+
+ui_draw_window_header() {
+    tput cup 0 0 2>/dev/null || true
+    local session="${SESSIONS[$SELECTED]:-}"
+    local win_count=${#WINDOWS[@]}
+    echo -n "${C_CLR}${C_BOLD}${C_TITLE} ${session}${C_RESET}  ${C_SELECT}[${win_count} windows]${C_RESET}"
+
+    tput cup 1 0 2>/dev/null || true
+    printf '%*s' "$TERM_COLS" '' | tr ' ' '─' 2>/dev/null || true
+}
+
+ui_draw_window_list() {
+    local start_row=2
+    local max_visible=$(( TERM_ROWS - 3 ))
+    local scroll=0
+
+    [ $WIN_SELECTED -ge $(( max_visible + scroll )) ] && scroll=$(( WIN_SELECTED - max_visible + 1 ))
+    [ $scroll -lt 0 ] && scroll=0
+
+    local end_idx=$(( scroll + max_visible ))
+    [ $end_idx -gt ${#WINDOWS[@]} ] && end_idx=${#WINDOWS[@]}
+
+    local row=$start_row
+    for (( i = scroll; i < end_idx; i++ )); do
+        tput cup $row 0 2>/dev/null || true
+        local entry="${WINDOWS[$i]}"
+        local widx="${entry%%|*}"
+        local rest="${entry#*|}"
+        local wname="${rest%|*}"
+        local active="${rest##*|}"
+
+        if [ $i -eq $WIN_SELECTED ]; then
+            echo -n "${C_CLR}${C_REVERSE} ${C_BOLD}> ${widx}: ${wname}${C_RESET}"
+            [ "$active" = "1" ] && echo -n " ${C_GREEN}(active)${C_RESET}"
+        else
+            echo -n "${C_CLR}   ${widx}: ${wname}"
+            [ "$active" = "1" ] && echo -n " ${C_GREEN}(active)${C_RESET}"
+        fi
+        row=$(( row + 1 ))
+    done
+
+    # Clear remaining list lines
+    while [ $row -lt $(( TERM_ROWS - 1 )) ]; do
+        tput cup $row 0 2>/dev/null || true
+        echo -n "${C_CLR}"
+        row=$(( row + 1 ))
+    done
+}
+
+ui_window_cursor_up() {
+    [ $WIN_SELECTED -gt 0 ] && WIN_SELECTED=$(( WIN_SELECTED - 1 )) || true
+}
+
+ui_window_cursor_down() {
+    [ $WIN_SELECTED -lt $(( ${#WINDOWS[@]} - 1 )) ] && WIN_SELECTED=$(( WIN_SELECTED + 1 )) || true
+}
+
+ui_window_select() {
+    if [ ${#WINDOWS[@]} -gt 0 ] && [ $WIN_SELECTED -lt ${#WINDOWS[@]} ]; then
+        local session="${SESSIONS[$SELECTED]}"
+        local entry="${WINDOWS[$WIN_SELECTED]}"
+        local widx="${entry%%|*}"
+        session_switch "${session}:${widx}" || true
+        exit 0
+    fi
 }
 
 ui_select() {
