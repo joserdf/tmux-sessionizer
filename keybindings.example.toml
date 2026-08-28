@@ -1,0 +1,37 @@
+# Example keybindings configuration for showrunner
+# Copy this file to ~/.showrunner/keybindings.toml and customize as needed.
+# All fields are optional — omitted fields fall back to the defaults shown here.
+# (Arrow keys, Enter, Esc, and Tab are not configurable.)
+
+# Normal-mode keybindings
+quit                = "q"
+move_up             = "k"
+move_down           = "j"
+toggle_collapse     = " "
+context_menu        = "a"
+add_project         = "p"
+toggle_archive_view = "Z"
+search              = "/"
+cycle_theme         = "t"
+
+# Context menu action keybindings
+[context_menu_keys]
+add_task                = "t"
+add_task_with_agent     = "T"
+new_session             = "n"
+new_session_with_agent  = "S"
+new_session_no_worktree = "N"
+new_adhoc_session       = "A"
+update                  = "u"
+push                    = "P"
+checkout                = "b"
+open_pr                 = "o"
+set_base_branch         = "B"
+archive                 = "A"
+delete                  = "d"
+merge                   = "m"
+terminal                = "t"
+copy_path               = "y"
+review                  = "r"
+fetch_pull              = "f"
+run                     = "x"

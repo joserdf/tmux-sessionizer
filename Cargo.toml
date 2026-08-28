@@ -1,0 +1,29 @@
+[package]
+name = "showrunner"
+version = "0.21.0"
+edition = "2024"
+description = "A terminal UI for managing multiple coding agent sessions organized by projects and tasks"
+license = "MIT"
+repository = "https://github.com/Bendzae/showrunner"
+homepage = "https://github.com/Bendzae/showrunner"
+readme = "README.md"
+keywords = ["agents", "tui", "tmux", "ai", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+ratatui = "0.30"
+crossterm = { version = "0.28", features = ["bracketed-paste"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
+anyhow = "1"
+serde_json = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+futures-util = "0.3"
+async-stream = "0.3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

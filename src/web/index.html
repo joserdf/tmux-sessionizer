@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0b0d12" />
+  <title>showrunner</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="list-view">
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark"><svg viewBox="0 0 100 100" fill="currentColor"><path d="M78 14 L38 14 L22 40 L62 40 Z"/><path d="M22 86 L62 86 L78 60 L38 60 Z"/></svg></span>
+        <span class="brand-name">show<b>runner</b></span>
+      </div>
+      <div class="header-actions">
+        <button class="add-project-btn" id="add-project-btn">+ project</button>
+        <div class="host-chip" id="host">…</div>
+      </div>
+    </header>
+    <main id="projects">
+      <div class="empty" id="loading">connecting…</div>
+    </main>
+  </div>
+
+  <div id="session-view" hidden>
+    <header class="session-header">
+      <button class="icon-btn" id="back-btn" aria-label="back">‹</button>
+      <div class="session-title">
+        <div class="session-name" id="sv-title"></div>
+        <div class="session-sub"><span class="dot" id="sv-dot"></span><span id="sv-status"></span></div>
+      </div>
+      <button class="icon-btn" id="sv-diff-btn">±</button>
+      <button class="icon-btn danger" id="kill-btn">kill</button>
+    </header>
+    <pre id="term"></pre>
+    <div class="controls">
+      <div class="quick-keys" id="quick-keys">
+        <button data-key="Escape">esc</button>
+        <button data-key="Up">↑</button>
+        <button data-key="Down">↓</button>
+        <button data-key="Tab">tab</button>
+        <button data-key="1">1</button>
+        <button data-key="2">2</button>
+        <button data-key="3">3</button>
+        <button data-key="y">y</button>
+        <button data-key="Enter" class="accent">↵</button>
+      </div>
+      <div class="input-row">
+        <textarea id="msg" rows="1" placeholder="message claude…" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+        <button id="send-btn" aria-label="send">▶</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="diff-view" hidden>
+    <header class="session-header">
+      <button class="icon-btn" id="diff-back-btn" aria-label="back">‹</button>
+      <div class="session-title">
+        <div class="session-name" id="dv-title"></div>
+        <div class="session-sub" id="dv-stats"></div>
+      </div>
+      <button class="icon-btn" id="diff-refresh-btn">⟳</button>
+    </header>
+    <div id="diff-body"></div>
+  </div>
+
+  <div id="sheet-backdrop" hidden>
+    <div id="sheet">
+      <div class="sheet-title" id="sheet-title">new task</div>
+      <input id="sheet-path" placeholder="project directory (absolute path)" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" hidden />
+      <input id="sheet-name" placeholder="task name" autocapitalize="off" autocomplete="off" autocorrect="off" />
+      <textarea id="sheet-prompt" rows="4" placeholder="initial prompt (optional)"></textarea>
+      <div class="sheet-actions">
+        <button id="sheet-cancel">cancel</button>
+        <button id="sheet-create" class="accent">create</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

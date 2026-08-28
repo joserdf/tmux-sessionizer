@@ -1,0 +1,8 @@
+{
+  "name": "showrunner",
+  "description": "Skills for Showrunner sessions: worktree commit/merge/push, and managing other tasks and sessions.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Showrunner"
+  }
+}
