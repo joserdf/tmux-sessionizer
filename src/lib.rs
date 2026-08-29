@@ -1,8 +1,12 @@
 pub mod agent;
 pub mod app;
+pub mod autoclose;
 pub mod cli;
 pub mod config;
 mod entry;
+pub mod discover;
+pub mod hooks;
+pub mod notify;
 pub mod ops;
 pub mod resources;
 pub mod server;

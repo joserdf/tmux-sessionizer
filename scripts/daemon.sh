@@ -54,7 +54,7 @@ daemon_start() {
         return 1
     fi
 
-    nohup "$BIN" serve >"$LOG_FILE" 2>&1 &
+    nohup "$BIN" serve --bind "127.0.0.1:${SESSIONIZER_PORT:-7878}" >"$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     return 0
 }
@@ -92,3 +92,23 @@ daemon_status() {
     rm -f "$PID_FILE"
     return 1
 }
+
+# Standalone entrypoint (when executed, not sourced): daemon.sh {start|stop|status}.
+# Sourced usage (sessionizer.tmux calls daemon_start/stop/status directly) skips this.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    case "${1:-status}" in
+        start)  daemon_start ;;
+        stop)   daemon_stop ;;
+        status)
+            if daemon_status; then
+                echo "showrunner daemon: running"
+            else
+                echo "showrunner daemon: not running"
+            fi
+            ;;
+        *)
+            echo "usage: daemon.sh {start|stop|status}" >&2
+            exit 1
+            ;;
+    esac
+fi

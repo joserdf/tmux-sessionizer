@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,6 +26,9 @@ struct ServerState {
     /// Last snapshot, served while the worker has no fresh update
     /// (e.g. two requests within one worker tick).
     last_state: Mutex<Option<Value>>,
+    /// Recent agent hook events (session id, normalized event, time), ingested
+    /// via POST /api/hook. Bounded to the most recent ~200.
+    hook_events: Mutex<VecDeque<(String, crate::hooks::AgentEvent, std::time::Instant)>>,
 }
 
 type ApiError = (StatusCode, String);
@@ -42,6 +46,7 @@ pub fn run(bind: &str) -> Result<()> {
         worker: Worker::spawn(),
         hostname: crate::app::detect_hostname(),
         last_state: Mutex::new(None),
+        hook_events: Mutex::new(VecDeque::new()),
     });
 
     if let Ok(cfg) = Config::load() {
@@ -69,6 +74,8 @@ pub fn run(bind: &str) -> Result<()> {
         .route("/api/tasks/delete", post(api_delete_task))
         .route("/api/sessions", post(api_create_session))
         .route("/api/adhoc", post(api_create_adhoc))
+        .route("/api/hook", post(api_hook))
+        .route("/api/hook-events", get(api_hook_events))
         .with_state(state);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -483,6 +490,50 @@ async fn api_kill(Path(name): Path<String>) -> Result<StatusCode, ApiError> {
         .map_err(internal)?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ingest a normalized agent hook event, POSTed by an agent's hook script.
+/// Body: `{ "agent": "claude"|"opencode"|"codex", ...agent-specific payload }`.
+/// The event is normalized and kept (bounded) for `GET /api/hook-events`.
+async fn api_hook(
+    State(state): State<Arc<ServerState>>,
+    axum::Json(body): axum::Json<Value>,
+) -> Result<StatusCode, ApiError> {
+    let agent = body.get("agent").and_then(Value::as_str).unwrap_or("");
+    let raw = body.to_string();
+    let event = match agent {
+        "claude" => crate::hooks::parse_claude_hook(&raw)
+            .ok_or_else(|| bad_request("could not parse claude hook payload"))?,
+        "opencode" => crate::hooks::parse_opencode_hook(&raw)
+            .ok_or_else(|| bad_request("could not parse opencode hook payload"))?,
+        "codex" => crate::hooks::parse_codex_hook(&raw)
+            .ok_or_else(|| bad_request("could not parse codex hook payload"))?,
+        other => return Err(bad_request(format!("unknown agent '{other}'"))),
+    };
+    let session_id = body
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .unwrap_or_default();
+
+    {
+        let mut evs = state.hook_events.lock().unwrap();
+        evs.push_back((session_id, event, std::time::Instant::now()));
+        while evs.len() > 200 {
+            evs.pop_front();
+        }
+    }
+    Ok(StatusCode::OK)
+}
+
+/// Recent ingested hook events (oldest first), for debugging/observability.
+async fn api_hook_events(State(state): State<Arc<ServerState>>) -> Result<axum::Json<Value>, ApiError> {
+    let evs = state.hook_events.lock().unwrap();
+    let arr: Vec<Value> = evs
+        .iter()
+        .map(|(sid, ev, _ts)| json!({ "session_id": sid, "event": ev }))
+        .collect();
+    Ok(axum::Json(json!({ "events": arr })))
 }
 
 #[derive(Deserialize)]

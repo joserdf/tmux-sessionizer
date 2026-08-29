@@ -39,6 +39,9 @@ Talking to another session:
   showrunner send <session> <text> [--no-submit]
   showrunner output <session> [--lines <n>]
 
+Discovery:
+  showrunner discover [--json] [dir ...]        find git projects to add
+
 <session> is a ref from `list` — `<project>/<task>/<session>`, `<project>/<task>`
 for that task's main session, or a raw tmux session name.
 ";
@@ -55,6 +58,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("ask") => Some(cmd_ask(rest)),
         Some("send") => Some(cmd_send(rest)),
         Some("output") => Some(cmd_output(rest)),
+        Some("discover") => Some(cmd_discover(rest)),
         Some("--help" | "-h" | "help") => {
             print!("{HELP}");
             Some(Ok(()))
@@ -580,6 +584,44 @@ fn cmd_output(args: &[String]) -> Result<()> {
     let text = tmux::capture_output_plain(&session.name, lines.clamp(10, 5000))
         .ok_or_else(|| anyhow::anyhow!("could not capture output for {reference}"))?;
     println!("{}", trim_pane(&text, tmux::session_agent(&session.name)));
+    Ok(())
+}
+
+/// Discover git projects to add: explicit dirs, or (by default) the ghq root,
+/// zoxide recents, and common top-level code directories under $HOME.
+fn cmd_discover(args: &[String]) -> Result<()> {
+    let (positional, flags) = parse_args(args, &[], &["json"])?;
+    let mut found: std::collections::BTreeSet<std::path::PathBuf> =
+        std::collections::BTreeSet::new();
+
+    if positional.is_empty() {
+        found.extend(crate::discover::from_ghq());
+        found.extend(crate::discover::from_zoxide());
+        if let Some(home) = crate::discover::home() {
+            for sub in ["code", "src", "projects", "dev", "repos", "workspace"] {
+                let dir = home.join(sub);
+                if dir.is_dir() {
+                    found.extend(crate::discover::git_repos_in(&dir, 2));
+                }
+            }
+        }
+    } else {
+        for dir in &positional {
+            found.extend(crate::discover::git_repos_in(std::path::Path::new(dir), 2));
+        }
+    }
+
+    if flags.contains_key("json") {
+        let arr: Vec<Value> = found
+            .iter()
+            .map(|p| json!({ "path": p.to_string_lossy() }))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+    } else {
+        for p in &found {
+            println!("{}", p.display());
+        }
+    }
     Ok(())
 }
 

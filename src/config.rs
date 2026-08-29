@@ -479,6 +479,10 @@ pub struct Config {
         serialize_with = "serialize_setup_commands"
     )]
     pub startup_skills: Vec<String>,
+    /// Auto-close policy (idle / finished). A table, so declared last. Defaults
+    /// to disabled (opt-in) because closing sessions is destructive.
+    #[serde(default)]
+    pub auto_close: crate::autoclose::AutoCloseConfig,
 }
 
 /// Root directory for all showrunner data: ~/.showrunner

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crate::autoclose::{self, AutoCloseConfig, CloseAction};
 use crate::resources::SessionResources;
 use crate::tmux::{self, DiffStats, SessionStatus, TmuxSession};
 
@@ -95,6 +96,14 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
     let has_gpu = crate::resources::gpu_available();
     let mut tick: u64 = 0;
     let mut generation: u64 = 0;
+    // Auto-close policy (opt-in; disabled by default). Read once at start.
+    let auto_close = match crate::config::Config::load() {
+        Ok(c) => c.auto_close,
+        Err(_) => AutoCloseConfig::default(),
+    };
+    let mut idle_since: HashMap<String, Instant> = HashMap::new();
+    let mut ac_acted: HashMap<String, CloseAction> = HashMap::new();
+    let mut prev_statuses: HashMap<String, SessionStatus> = HashMap::new();
 
     loop {
         let sessions = tmux::list_sessions().unwrap_or_default();
@@ -155,6 +164,22 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
 
             statuses.insert(session.name.clone(), status);
         }
+
+        // Surface a permission prompt to the OS (once per transition), so the
+        // user is alerted even when the TUI is in another pane. The tmux status
+        // bar badge is driven separately by the daemon's status.cache.
+        for (name, status) in statuses.iter() {
+            if *status == SessionStatus::WaitingForPermission
+                && prev_statuses.get(name) != Some(&SessionStatus::WaitingForPermission)
+            {
+                crate::notify::send(&crate::notify::Notification {
+                    title: "showrunner: approval needed".to_string(),
+                    body: format!("Session '{name}' is waiting for a permission decision."),
+                    urgent: true,
+                });
+            }
+        }
+        prev_statuses = statuses.clone();
 
         // Publish statuses right away with the previously computed maps — the
         // git work below can take many seconds on a cold start, and statuses
@@ -240,6 +265,18 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
             }
         }
 
+        // Evaluate the auto-close policy on a reduced cadence (~every 2s),
+        // before publishing so a killed session drops out on the next tick.
+        if tick % 4 == 0 {
+            auto_close_step(
+                &auto_close,
+                &statuses,
+                &session_agents,
+                &mut idle_since,
+                &mut ac_acted,
+            );
+        }
+
         generation += 1;
         let update = WorkerUpdate {
             sessions,
@@ -272,5 +309,111 @@ fn get_current_branch(project_path: &str) -> Option<String> {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         None
+    }
+}
+
+/// The pane's current working directory (the session's worktree).
+fn pane_cwd(session_name: &str) -> Option<String> {
+    let target = format!("{session_name}:0");
+    let output = std::process::Command::new("tmux")
+        .args(["display-message", "-t", &target, "-p", "#{pane_current_path}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+/// Whether the git repo at `cwd` has uncommitted changes (porcelain non-empty).
+fn worktree_dirty(cwd: &str) -> bool {
+    let Ok(output) = std::process::Command::new("git")
+        .args(["-C", cwd, "status", "--porcelain"])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+}
+
+/// Apply the auto-close policy to agent sessions (never plain terminals or run
+/// sessions). A clean finished/idle session is closed; a dirty one is left
+/// alone but surfaced once via a notification. Uses `kill_session_only` so the
+/// worktree/branch/records are preserved.
+fn auto_close_step(
+    cfg: &AutoCloseConfig,
+    statuses: &HashMap<String, SessionStatus>,
+    session_agents: &HashMap<String, String>,
+    idle_since: &mut HashMap<String, Instant>,
+    acted: &mut HashMap<String, CloseAction>,
+) {
+    if !cfg.enabled {
+        return;
+    }
+    for (name, _agent) in session_agents.iter() {
+        let Some(status) = statuses.get(name) else {
+            continue;
+        };
+        let finished = *status == SessionStatus::Finished;
+
+        // Track how long the session has been idle (agent finished a turn and
+        // is waiting for input). WaitingForPermission is NOT idle (it needs
+        // action), and Running is actively working.
+        if *status == SessionStatus::WaitingForInput {
+            idle_since.entry(name.clone()).or_insert(Instant::now());
+        } else {
+            idle_since.remove(name);
+        }
+        let idle = idle_since.get(name).is_some_and(|since| {
+            cfg.idle_secs
+                .is_some_and(|secs| since.elapsed() >= Duration::from_secs(secs))
+        });
+
+        if !finished && !idle {
+            acted.remove(name);
+            continue;
+        }
+
+        // Only pay for a git status check on close candidates.
+        let dirty = pane_cwd(name).is_some_and(|cwd| worktree_dirty(&cwd));
+        let action = autoclose::evaluate(
+            cfg,
+            &autoclose::SessionCloseState {
+                finished,
+                idle,
+                has_uncommitted_changes: dirty,
+            },
+        );
+
+        match action {
+            CloseAction::Close => {
+                let _ = tmux::kill_session_only(name);
+                idle_since.remove(name);
+                acted.remove(name);
+                crate::notify::send(&crate::notify::Notification {
+                    title: "showrunner: auto-closed".to_string(),
+                    body: format!("Session '{name}' was auto-closed (agent finished, clean)."),
+                    urgent: false,
+                });
+            }
+            CloseAction::Confirm => {
+                if acted.get(name) != Some(&CloseAction::Confirm) {
+                    acted.insert(name.clone(), CloseAction::Confirm);
+                    crate::notify::send(&crate::notify::Notification {
+                        title: "showrunner: auto-close blocked".to_string(),
+                        body: format!("Session '{name}' has uncommitted changes; it was not auto-closed."),
+                        urgent: true,
+                    });
+                }
+            }
+            CloseAction::None => {
+                acted.remove(name);
+            }
+        }
     }
 }
