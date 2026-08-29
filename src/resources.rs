@@ -1,8 +1,9 @@
-//! Per-session resource monitoring (CPU, memory) and GPU usage, for ALL tmux
-//! sessions (not just showrunner-managed ones).
+//! Per-session resource monitoring (CPU, memory) and GPU usage.
 //!
 //! CPU/mem are computed by walking each session's pane process trees via
-//! `/proc`. GPU usage comes from `nvidia-smi`.
+//! `/proc`. GPU usage comes from `nvidia-smi`. `sample_sessions`/
+//! `all_sessions_resources` can target any set of tmux sessions; the worker
+//! feeds it the showrunner-managed (`cm*`) sessions it already tracks.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -45,15 +46,17 @@ pub fn sample_sessions(names: &[String]) -> HashMap<String, SessionResources> {
 
     let map = build_ppid_map();
 
+    // One `tmux list-panes -a` for all sessions (not one spawn per session).
+    let all_pane_pids = crate::tmux::list_all_pane_pids();
+
     // pid -> session name, so each sampled pid can be attributed back.
     let mut owners: HashMap<u32, &str> = HashMap::new();
     let mut all_pids: Vec<u32> = Vec::new();
     for name in names {
-        let pane_pids = crate::tmux::list_pane_pids(name);
-        if pane_pids.is_empty() {
+        let Some(pane_pids) = all_pane_pids.get(name) else {
             continue;
-        }
-        for pid in descendants(&pane_pids, &map) {
+        };
+        for pid in descendants(pane_pids, &map) {
             owners.insert(pid, name);
             all_pids.push(pid);
         }
@@ -182,25 +185,35 @@ fn read_rss_kb(pid: u32) -> u64 {
         .unwrap_or(0)
 }
 
+/// Hard timeout for any `nvidia-smi` query. A wedged GPU driver can hang
+/// nvidia-smi indefinitely; bounding it keeps one stuck query from freezing the
+/// caller (which would stall every status update in the worker).
+const GPU_QUERY_TIMEOUT: Duration = Duration::from_millis(2000);
+
+/// Run an `nvidia-smi` subcommand on a throwaway thread with a hard timeout.
+/// Returns `None` if it times out or fails to spawn. A timed-out query abandons
+/// the (stuck) thread rather than block on it.
+fn run_nvidia_smi(args: Vec<&'static str>) -> Option<std::process::Output> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("nvidia-smi").args(args).output().ok();
+        let _ = tx.send(out);
+    });
+    rx.recv_timeout(GPU_QUERY_TIMEOUT).ok().flatten()
+}
+
 /// Whether nvidia-smi is available.
 pub fn gpu_available() -> bool {
-    std::process::Command::new("nvidia-smi")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    run_nvidia_smi(vec!["--version"]).map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// (pid, used GPU memory MiB) for every process currently using a GPU, from
-/// `nvidia-smi`. Empty if nvidia-smi is missing or errors.
+/// `nvidia-smi`. Empty if nvidia-smi is missing, errors, or times out.
 pub fn gpu_processes() -> Vec<(u32, u64)> {
-    let Ok(out) = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-compute-apps=pid,used_gpu_memory",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-    else {
+    let Some(out) = run_nvidia_smi(vec![
+        "--query-compute-apps=pid,used_gpu_memory",
+        "--format=csv,noheader,nounits",
+    ]) else {
         return Vec::new();
     };
     if !out.status.success() {
@@ -256,35 +269,53 @@ mod tests {
     }
 
     // Runtime check against a real tmux session (requires tmux; skipped by
-    // default, run with: cargo test -- --ignored resources::runtime).
+    // default, run with: cargo test -- --ignored runtime_session_resources).
     #[test]
     #[ignore]
     fn runtime_session_resources() {
         use std::process::Command;
 
+        const SESSION: &str = "_sr_runtime";
+        // Kill any stale session from a prior crashed run before starting.
+        let _ = Command::new("tmux").args(["kill-session", "-t", SESSION]).output();
+
+        // Teardown guard: kills the session even if an assertion panics below.
+        struct Cleanup(&'static str);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux").args(["kill-session", "-t", self.0]).output();
+            }
+        }
+        let _cleanup = Cleanup(SESSION);
+
+        assert!(
+            Command::new("tmux")
+                .args(["new-session", "-d", "-s", SESSION])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false),
+            "could not create tmux session (is a tmux server available?)"
+        );
+
+        // A real CPU burner (not a sleeping loop) so the CPU-attribution path
+        // is actually exercised.
         let _ = Command::new("tmux")
-            .args(["new-session", "-d", "-s", "_sr_runtime"])
+            .args(["send-keys", "-t", SESSION, "yes > /dev/null", "Enter"])
             .output();
-        let _ = Command::new("tmux")
-            .args([
-                "send-keys",
-                "-t",
-                "_sr_runtime",
-                "python3 -c 'import time; [time.sleep(0.001) for _ in range(200000)]'",
-                "Enter",
-            ])
-            .output();
-        std::thread::sleep(std::time::Duration::from_millis(800));
+        std::thread::sleep(std::time::Duration::from_millis(600));
+
+        let r = session_resources(SESSION);
+        assert!(r.mem_kb > 0, "expected some memory, got {}", r.mem_kb);
+        assert!(
+            r.cpu_percent > 0.0,
+            "expected non-zero CPU from the burner, got {}",
+            r.cpu_percent
+        );
 
         let all = all_sessions_resources();
-        let found = all.iter().any(|(n, _)| n == "_sr_runtime");
-        assert!(found, "session _sr_runtime should appear; got: {all:?}");
-
-        let r = session_resources("_sr_runtime");
-        assert!(r.mem_kb > 0, "expected some memory, got {}", r.mem_kb);
-
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", "_sr_runtime"])
-            .output();
+        assert!(
+            all.iter().any(|(n, _)| n == SESSION),
+            "session {SESSION} should appear; got: {all:?}"
+        );
     }
 }

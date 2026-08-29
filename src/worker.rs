@@ -48,6 +48,9 @@ pub struct WorkerUpdate {
     /// (pid, used GPU memory MiB) for every process using a GPU; sampled on the
     /// same cadence as `resources`.
     pub gpu: Vec<(u32, u64)>,
+    /// Monotonically increasing; bumped on every publish. Lets SSE clients emit
+    /// only on change instead of re-sending the identical state each poll.
+    pub generation: u64,
 }
 
 pub struct Worker {
@@ -83,13 +86,15 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
     let mut pr_urls: HashMap<String, String> = HashMap::new();
     let mut task_diff_stats: HashMap<String, DiffStats> = HashMap::new();
     let mut project_branches: HashMap<String, String> = HashMap::new();
-    // Resource caches: the sampler sleeps ~200ms, so refresh every 8th tick
-    // (~4s) and carry the last values forward on the ticks in between.
+    // Resource caches: the sampler takes a ~200ms CPU window, so refresh every
+    // 8th tick (each tick is a 500ms sleep plus per-session probes, so this is
+    // roughly every several seconds) and carry the last values forward in between.
     let mut resources: HashMap<String, SessionResources> = HashMap::new();
     let mut gpu: Vec<(u32, u64)> = Vec::new();
     // Probe once: don't spawn `nvidia-smi` on every tick on GPU-less machines.
     let has_gpu = crate::resources::gpu_available();
     let mut tick: u64 = 0;
+    let mut generation: u64 = 0;
 
     loop {
         let sessions = tmux::list_sessions().unwrap_or_default();
@@ -154,6 +159,7 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
         // Publish statuses right away with the previously computed maps — the
         // git work below can take many seconds on a cold start, and statuses
         // are the most time-sensitive signal.
+        generation += 1;
         *latest.lock().unwrap() = Some(WorkerUpdate {
             sessions: sessions.clone(),
             statuses: statuses.clone(),
@@ -166,6 +172,7 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
             run_sessions: tmux::list_run_sessions(),
             resources: resources.clone(),
             gpu: gpu.clone(),
+            generation,
         });
 
         // Refresh diff stats and terminal counts less frequently (~every 2 seconds)
@@ -233,6 +240,7 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
             }
         }
 
+        generation += 1;
         let update = WorkerUpdate {
             sessions,
             statuses,
@@ -245,6 +253,7 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
             run_sessions: tmux::list_run_sessions(),
             resources: resources.clone(),
             gpu: gpu.clone(),
+            generation,
         };
 
         *latest.lock().unwrap() = Some(update);

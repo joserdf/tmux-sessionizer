@@ -843,6 +843,32 @@ pub fn list_pane_pids(session_name: &str) -> Vec<u32> {
         .collect()
 }
 
+/// Pane PIDs for every tmux session in ONE `tmux list-panes -a` call (keyed by
+/// session name). Avoids the N process spawns of calling `list_pane_pids` per
+/// session — used by the batched resource sampler.
+pub fn list_all_pane_pids() -> HashMap<String, Vec<u32>> {
+    let output = Command::new("tmux")
+        .args(["list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}"])
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(_) => return HashMap::new(),
+    };
+    if !output.status.success() {
+        return HashMap::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut map: HashMap<String, Vec<u32>> = HashMap::new();
+    for line in stdout.lines() {
+        let mut it = line.splitn(2, '\t');
+        let session = it.next().unwrap_or_default();
+        let pid = it.next().and_then(|p| p.trim().parse::<u32>().ok());
+        if let Some(pid) = pid {
+            map.entry(session.to_string()).or_default().push(pid);
+        }
+    }
+    map
+}
 
 /// Create a terminal window in the session rooted at `work_dir`. Returns its
 /// window index.
@@ -2062,12 +2088,25 @@ pub fn probe_session(session_name: &str) -> Option<SessionProbe> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
 
-    let agent_alive = pane_comm == process_name
+    let mut agent_alive = pane_comm == process_name
         || Command::new("pgrep")
             .args(["-P", &pane_pid.to_string(), "-x", process_name])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
+
+    // Fallback for agents that run as a `node` script (comm is `node`, so
+    // `pgrep -x <name>` misses them): match the command line of the pane's
+    // direct children.
+    if !agent_alive {
+        if let Some(term) = agent.node_argv_term() {
+            agent_alive = Command::new("pgrep")
+                .args(["-P", &pane_pid.to_string(), "-f", term])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+        }
+    }
 
     let content = capture_pane_plain(&target).unwrap_or_default();
     let content_hash = hash_content(&content);

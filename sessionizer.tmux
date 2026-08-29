@@ -22,14 +22,15 @@ fi
 export SESSIONIZER_BIN
 export SESSIONIZER_CACHE_DIR="$CACHE_DIR"
 
-# Mark loaded so bindings + auto-start only run once per server (idempotent).
-tmux set-option -g @tmux_sessionizer_loaded true 2>/dev/null || true
+# Shell-escape the binary path so the popup command survives paths with spaces
+# (display-popup runs its command via /bin/sh).
+SESSIONIZER_BIN_ESC=$(printf '%q' "$SESSIONIZER_BIN")
 
 # Alt+s: open the TUI in a popup (popup exits when the TUI exits).
-tmux bind-key -n M-s display-popup -w 90% -h 90% -E "$SESSIONIZER_BIN" 2>/dev/null || true
+tmux bind-key -n M-s display-popup -w 90% -h 90% -E "$SESSIONIZER_BIN_ESC" 2>/dev/null || true
 
 # Alt+n: quick access to the TUI (new/switch sessions) in a popup.
-tmux bind-key -n M-n display-popup -w 90% -h 90% -E "$SESSIONIZER_BIN" 2>/dev/null || true
+tmux bind-key -n M-n display-popup -w 90% -h 90% -E "$SESSIONIZER_BIN_ESC" 2>/dev/null || true
 
 # Alt+a: toggle the showrunner daemon on/off.
 tmux bind-key -n M-a run-shell -b "source '$SESSIONIZER_PATH/scripts/daemon.sh'; if daemon_status; then daemon_stop; tmux display-message 'showrunner daemon: stopped'; else daemon_start && tmux display-message 'showrunner daemon: started' || tmux display-message 'showrunner daemon: failed to start'; fi" 2>/dev/null || true

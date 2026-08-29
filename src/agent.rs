@@ -71,6 +71,19 @@ impl AgentKind {
         self.id()
     }
 
+    /// For agents that can run as a plain node script (comm `node` rather than
+    /// their own name), the command-line term to search for when the exact
+    /// `pgrep -x` liveness check fails. `None` for agents whose process name is
+    /// reliable (the npm/opencode binary self-reports `comm=opencode`).
+    pub fn node_argv_term(self) -> Option<&'static str> {
+        match self {
+            // Older node-script opencode installs run as `node …/opencode …`,
+            // so `comm` is `node` and `pgrep -x opencode` misses them.
+            AgentKind::OpenCode => Some(self.id()),
+            _ => None,
+        }
+    }
+
     /// Markers for dialogs that need the user's attention (permission prompts
     /// and question selectors), matched against the bottom of the pane.
     pub fn attention_markers(self) -> &'static [&'static str] {
@@ -121,16 +134,14 @@ impl AgentKind {
             // and stats footer render below the bottom rule and are cut with
             // it. It draws no rules inside the transcript.
             AgentKind::Pi => line.chars().count() >= 10 && line.chars().all(|c| c == '─'),
-            // OpenCode uses standard interactive prompt frames or indicators.
-            // Heuristic for OpenCode prompt input box line & border rules:
-            // Input prompt indicators like `>` or `❯`, or border box characters (`│`, `╭`, `└`, `─`),
-            // or typical prompt/status bar lines. Note: may need validation against specific OpenCode TUI themes.
+            // OpenCode's input box sits at the bottom of the pane, framed by full-width
+            // rules with a `❯` prompt line. Match only those distinctive
+            // markers: a bare `>`, `│` side-rails, and box corners appear in
+            // ordinary tool output (tables, trees, captured panes) and would
+            // wrongly truncate the transcript. (Conservative pending a captured
+            // opencode pane to pin the exact glyphs per theme.)
             AgentKind::OpenCode => {
                 line == "❯"
-                    || line == ">"
-                    || line.starts_with('╭')
-                    || line.starts_with('└')
-                    || line.starts_with('│')
                     || (line.chars().count() >= 10 && line.chars().all(|c| c == '─' || c == '━'))
             }
         }

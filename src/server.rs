@@ -9,7 +9,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
-use futures_util::stream::Stream;
+use futures_core::stream::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::time::interval;
@@ -240,6 +240,7 @@ async fn api_state(State(state): State<Arc<ServerState>>) -> Result<Response, Ap
                         run_sessions: Default::default(),
                         resources: Default::default(),
                         gpu: Default::default(),
+                        generation: 0,
                     };
                     build_state(&cfg, &u, &state.hostname)
                 }
@@ -257,8 +258,12 @@ async fn api_state(State(state): State<Arc<ServerState>>) -> Result<Response, Ap
 async fn api_events(
     State(state): State<Arc<ServerState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = async_stream::stream! {
+      let stream = async_stream::stream! {
         let mut timer = interval(Duration::from_millis(500));
+        // A stalled client shouldn't burst-receive every missed tick.
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_gen: u64 = 0;
+        let mut last_json: String = String::new();
         loop {
             timer.tick().await;
 
@@ -267,7 +272,13 @@ async fn api_events(
                 latest.clone()
             };
 
+            // Skip the (relatively expensive) rebuild when the worker hasn't
+            // published a new update since this client last looked.
             if let Some(u) = update_opt {
+                if u.generation == last_gen {
+                    continue;
+                }
+                let update_gen = u.generation;
                 let state_clone = Arc::clone(&state);
                 let res = tokio::task::spawn_blocking(move || {
                     let cfg = Config::load().ok()?;
@@ -279,14 +290,21 @@ async fn api_events(
                 .await;
 
                 if let Ok(Some(snapshot)) = res {
-                    let event = Event::default().event("state").data(snapshot.to_string());
-                    yield Ok(event);
-                    continue;
+                    let json = snapshot.to_string();
+                    // Only emit when the serialized state actually changed. The
+                    // worker republishes (bumping generation) even when nothing
+                    // changed, so without this the identical full payload would
+                    // be re-sent to every client on each publish.
+                    if json != last_json {
+                        let event = Event::default().event("state").data(json.clone());
+                        last_json = json;
+                        last_gen = update_gen;
+                        yield Ok(event);
+                    } else {
+                        last_gen = update_gen;
+                    }
                 }
             }
-
-            // Emit a ping comment if no update available or build_state failed
-            yield Ok(Event::default().comment("ping"));
         }
     };
 
@@ -311,9 +329,11 @@ mod sse_tests {
             run_sessions: Default::default(),
             resources: Default::default(),
             gpu: Default::default(),
+            generation: 0,
         };
         let u2 = u.clone();
         assert_eq!(u2.sessions.len(), 0);
+        assert_eq!(u2.generation, 0);
     }
 }
 
