@@ -71,6 +71,9 @@ pub enum InputMode {
     ReviewSessionPicker,
     /// Pick the agent harness before an add-task / new-session flow.
     AgentPicker,
+    /// Type a message to send to the selected session's agent (quick reply /
+    /// answer to a question it asked).
+    SendMessage,
 }
 
 /// What the agent picker feeds into once an agent is chosen.
@@ -125,6 +128,10 @@ pub enum ContextAction {
     RunKill,
     /// An agent chosen in the agent picker.
     PickAgent(AgentKind),
+    /// Send a typed message to the selected session's agent.
+    SendMessage,
+    /// Approve the selected session's pending permission prompt (sends "y").
+    Approve,
 }
 
 /// Where a "Run" action should execute: the owning project (whose `run_command`
@@ -305,6 +312,8 @@ pub struct App {
     pub should_review_hunk: Option<HunkReview>,
     pub pending_project_path: Option<String>,
     pub pending_task_name: Option<String>,
+    /// Target tmux session for an in-progress "Send message" prompt.
+    pub pending_send_session: Option<String>,
     pub pending_task_branch: Option<String>,
     pub pending_session_name: Option<String>,
     /// Agent chosen in the agent picker, consumed by the next create flow.
@@ -361,6 +370,11 @@ pub struct App {
     /// Per-session CPU/mem, keyed by tmux session name. Populated by the
     /// background worker (sampled every 8th tick).
     pub resources: HashMap<String, SessionResources>,
+    /// Per-session GPU memory (MiB), computed on demand when the resource panel
+    /// opens (not on the worker tick).
+    pub gpu_by_session: HashMap<String, u64>,
+    /// Whether the resource (CPU/mem/GPU) panel overlay is shown.
+    pub show_resources: bool,
     /// Index into `theme::THEMES` of the active color theme.
     pub theme_index: usize,
     /// Screen row (relative to the list area top) of the selected item, recorded
@@ -580,6 +594,7 @@ impl App {
             should_review_hunk: None,
             pending_project_path: None,
             pending_task_name: None,
+            pending_send_session: None,
             pending_task_branch: None,
             pending_session_name: None,
             pending_agent: None,
@@ -613,6 +628,8 @@ impl App {
             pending_run: None,
             run_sessions: HashMap::new(),
             resources: HashMap::new(),
+            gpu_by_session: HashMap::new(),
+            show_resources: false,
             theme_index: config::load_theme()
                 .map(|n| crate::theme::by_name(&n))
                 .unwrap_or(0),
@@ -1215,6 +1232,16 @@ impl App {
                 }
                 items.extend([
                     ContextMenuItem {
+                        key: cm.send_message,
+                        label: "Send message",
+                        action: ContextAction::SendMessage,
+                    },
+                    ContextMenuItem {
+                        key: cm.approve,
+                        label: "Approve (y)",
+                        action: ContextAction::Approve,
+                    },
+                    ContextMenuItem {
                         key: cm.terminal,
                         label: "Terminal",
                         action: ContextAction::Terminal,
@@ -1280,6 +1307,8 @@ impl App {
             ContextAction::RunAttach => self.run_attach(),
             ContextAction::RunRestart => self.run_restart(),
             ContextAction::RunKill => self.run_kill(),
+            ContextAction::SendMessage => self.start_send_message(),
+            ContextAction::Approve => self.approve_session(),
             ContextAction::PickAgent(agent) => self.confirm_agent_picker(agent),
         }
     }
@@ -1839,6 +1868,88 @@ impl App {
         }
         // Window 0 is the agent; the first terminal is window 1.
         self.should_attach_window = Some((name, 1));
+    }
+
+    /// The tmux name of the selected session, if the selection is a session.
+    fn selected_session_name(&self) -> Option<String> {
+        match self.selected_item() {
+            Some(ListItem::Session { session, .. })
+            | Some(ListItem::AdhocSession { session, .. }) => Some(session.name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Open the "Send message" prompt targeting the selected session.
+    pub fn start_send_message(&mut self) {
+        match self.selected_session_name() {
+            Some(name) => {
+                self.input_buffer.clear();
+                self.status_message = Some(format!("Send message to {name}:"));
+                self.pending_send_session = Some(name);
+                self.input_mode = InputMode::SendMessage;
+            }
+            None => self.status_message = Some("Select a session to send a message".into()),
+        }
+    }
+
+    /// Send the buffered message to the pending session's agent and submit it.
+    pub fn confirm_send_message(&mut self) {
+        let Some(name) = self.pending_send_session.take() else {
+            self.input_mode = InputMode::Normal;
+            return;
+        };
+        let msg = self.input_buffer.clone();
+        self.input_buffer.clear();
+        self.input_mode = InputMode::Normal;
+        if msg.trim().is_empty() {
+            self.status_message = Some("Empty message — nothing sent".into());
+            return;
+        }
+        self.start_op(&format!("Sending to {name}..."), move || {
+            match crate::tmux::send_text(&name, &msg, true) {
+                Ok(()) => OpResult {
+                    message: format!("Sent message to '{name}'"),
+                    rebuild: false,
+                    reload_config: false,
+                },
+                Err(e) => OpResult {
+                    message: format!("Send failed: {e}"),
+                    rebuild: false,
+                    reload_config: false,
+                },
+            }
+        });
+    }
+
+    /// Approve the selected session's pending permission prompt (sends "y").
+    pub fn approve_session(&mut self) {
+        let Some(name) = self.selected_session_name() else {
+            self.status_message = Some("Select a session to approve".into());
+            return;
+        };
+        self.start_op(&format!("Approving {name}..."), move || {
+            match crate::tmux::send_text(&name, "y", true) {
+                Ok(()) => OpResult {
+                    message: format!("Sent approval to '{name}'"),
+                    rebuild: false,
+                    reload_config: false,
+                },
+                Err(e) => OpResult {
+                    message: format!("Approve failed: {e}"),
+                    rebuild: false,
+                    reload_config: false,
+                },
+            }
+        });
+    }
+
+    /// Toggle the per-session resource (CPU/mem/GPU) panel. GPU attribution is
+    /// computed on demand when the panel opens.
+    pub fn toggle_resources(&mut self) {
+        self.show_resources = !self.show_resources;
+        if self.show_resources {
+            self.gpu_by_session = crate::resources::gpu_by_session();
+        }
     }
 
     pub fn start_search(&mut self) {

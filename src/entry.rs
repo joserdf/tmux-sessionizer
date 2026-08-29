@@ -27,10 +27,11 @@ fn is_text_input_mode(mode: InputMode) -> bool {
             | InputMode::AddTaskName
             | InputMode::AddTaskBranch
             | InputMode::AddTaskPrompt
-            | InputMode::MergeCommitMessage
+            |           InputMode::MergeCommitMessage
             | InputMode::SetBaseBranch
             | InputMode::Search
             | InputMode::RunCommand
+            | InputMode::SendMessage
     )
 }
 
@@ -112,6 +113,17 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 
                 let kb = app.keybindings.clone();
                 match app.input_mode {
+                    // The resource panel is a modal overlay: only its toggle key
+                    // (or q/Esc) closes it; other keys are ignored while shown.
+                    InputMode::Normal if app.show_resources => match key.code {
+                        KeyCode::Char(c) if c == kb.resources => {
+                            app.show_resources = false;
+                        }
+                        KeyCode::Char('q') | KeyCode::Esc => {
+                            app.show_resources = false;
+                        }
+                        _ => {}
+                    },
                     InputMode::Normal => match key.code {
                         KeyCode::Char(c) if c == kb.quit => {
                             app.should_quit = true;
@@ -135,6 +147,7 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         }
                         KeyCode::Char(c) if c == kb.search => app.start_search(),
                         KeyCode::Char(c) if c == kb.cycle_theme => app.cycle_theme(),
+                        KeyCode::Char(c) if c == kb.resources => app.toggle_resources(),
                         _ => {}
                     },
                     InputMode::ContextMenu => match key.code {
@@ -330,6 +343,21 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                             }
                         }
                         KeyCode::Esc => app.cancel_input(),
+                        KeyCode::Backspace => {
+                            app.input_buffer.pop();
+                        }
+                        KeyCode::Char(c) => app.input_buffer.push(c),
+                        _ => {}
+                    },
+                    InputMode::SendMessage => match key.code {
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.input_buffer.push('\n');
+                        }
+                        KeyCode::Enter => app.confirm_send_message(),
+                        KeyCode::Esc => {
+                            app.pending_send_session = None;
+                            app.cancel_input();
+                        }
                         KeyCode::Backspace => {
                             app.input_buffer.pop();
                         }

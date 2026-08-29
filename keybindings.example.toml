@@ -13,6 +13,7 @@ add_project         = "p"
 toggle_archive_view = "Z"
 search              = "/"
 cycle_theme         = "t"
+resources           = "h"
 
 # Context menu action keybindings
 [context_menu_keys]
@@ -35,3 +36,5 @@ copy_path               = "y"
 review                  = "r"
 fetch_pull              = "f"
 run                     = "x"
+send_message            = "s"
+approve                 = "a"

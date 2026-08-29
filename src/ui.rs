@@ -113,6 +113,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.input_mode == InputMode::ReviewSessionPicker {
         draw_review_session_picker(f, app, list_area);
     }
+
+    if app.show_resources {
+        draw_resource_panel(f, app, list_area);
+    }
 }
 
 /// Top dashboard strip: app name + live counts of session states.
@@ -202,10 +206,11 @@ fn is_text_input_mode(mode: InputMode) -> bool {
             | InputMode::AddTaskName
             | InputMode::AddTaskBranch
             | InputMode::AddTaskPrompt
-            | InputMode::MergeCommitMessage
+            |          InputMode::MergeCommitMessage
             | InputMode::SetBaseBranch
             | InputMode::Search
             | InputMode::RunCommand
+            | InputMode::SendMessage
     )
 }
 
@@ -287,6 +292,86 @@ fn draw_floating_input(f: &mut Frame, app: &App, area: Rect) {
         vertical: 0,
     });
     f.render_widget(paragraph, inner_padded);
+}
+
+/// Resource overlay: per-session CPU / memory / GPU with a totals row. GPU
+/// attribution is computed on demand when the panel opens (see
+/// `App::toggle_resources`).
+fn draw_resource_panel(f: &mut Frame, app: &App, area: Rect) {
+    let width = (area.width * 75 / 100).max(50);
+    let height = (area.height * 85 / 100).max(6);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let rect = Rect { x, y, width, height };
+    f.render_widget(Clear, rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(current().accent))
+        .title(Span::styled(
+            " Resources — per session  (h / q to close) ",
+            Style::default().fg(current().accent).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let name_w = (inner.width.saturating_sub(24)).max(10) as usize;
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(current().muted);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(format!("{:<name_w$}  ", "SESSION"), bold),
+        Span::styled(format!("{:>5}  ", "CPU%"), bold),
+        Span::styled(format!("{:>7}  ", "MEM"), bold),
+        Span::styled(format!("{:>7}", "GPU"), bold),
+    ]));
+
+    let mut total_cpu = 0f32;
+    let mut total_mem_kb: u64 = 0;
+    let mut total_gpu_mib: u64 = 0;
+    let mut shown = 0usize;
+
+    for session in &app.sessions {
+        let res = app.resources.get(&session.name);
+        let cpu = res.map(|r| r.cpu_percent).unwrap_or(0.0);
+        let mem_kb = res.map(|r| r.mem_kb).unwrap_or(0);
+        let gpu_mib = app.gpu_by_session.get(&session.name).copied().unwrap_or(0);
+        total_cpu += cpu;
+        total_mem_kb += mem_kb;
+        total_gpu_mib += gpu_mib;
+        shown += 1;
+
+        let name: String = session.name.chars().take(name_w).collect();
+        lines.push(Line::from(vec![
+            Span::raw(format!("{name:<name_w$}  ")),
+            Span::raw(format!("{:>5}  ", cpu as u32)),
+            Span::raw(format!("{:>7}  ", mem_human(mem_kb))),
+            Span::styled(
+                format!("{:>7}", if gpu_mib > 0 { format!("{gpu_mib}M") } else { "-".into() }),
+                if gpu_mib > 0 { Style::default().fg(current().cyan) } else { dim },
+            ),
+        ]));
+    }
+
+    if shown == 0 {
+        lines.push(Line::from(Span::styled("  (no sessions)", dim)));
+    }
+
+    lines.push(Line::from(Span::raw("")));
+    lines.push(Line::from(vec![
+        Span::styled(format!("{:<name_w$}  ", "TOTAL"), bold),
+        Span::styled(format!("{:>5}  ", total_cpu as u32), bold),
+        Span::styled(format!("{:>7}  ", mem_human(total_mem_kb)), bold),
+        Span::styled(
+            format!("{:>7}", if total_gpu_mib > 0 { format!("{total_gpu_mib}M") } else { "-".into() }),
+            bold,
+        ),
+    ]));
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(para, inner);
 }
 
 fn is_project_collapsed(app: &App, name: &str) -> bool {
@@ -1542,6 +1627,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
                         },
                     ),
                     (&key_display(kb.add_project), "add project"),
+                    (&key_display(kb.resources), "resources"),
                     (&key_display(kb.quit), "quit"),
                 ])
             }
@@ -1562,7 +1648,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             ("↑/↓", "navigate"),
             ("Esc", "cancel"),
         ]),
-        InputMode::AddTaskPrompt | InputMode::AddSessionPrompt | InputMode::MergeCommitMessage => {
+        InputMode::AddTaskPrompt
+        | InputMode::AddSessionPrompt
+        | InputMode::MergeCommitMessage
+        | InputMode::SendMessage => {
             help_bar(&[("⏎", "confirm"), ("⌥⏎", "newline"), ("Esc", "cancel")])
         }
         InputMode::AddProjectName

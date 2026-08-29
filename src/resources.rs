@@ -23,6 +23,32 @@ pub fn all_sessions_resources() -> Vec<(String, SessionResources)> {
     sample_sessions(&crate::tmux::list_all_tmux_sessions()).into_iter().collect()
 }
 
+/// Attribute currently-used GPU memory (from `nvidia-smi`) to tmux sessions:
+/// each GPU-using process pid is mapped to the session whose process tree owns
+/// it. Returns session name -> total used GPU memory (MiB). Empty when nothing
+/// is using a GPU. Computed on demand (the resource panel), not on the worker tick.
+pub fn gpu_by_session() -> HashMap<String, u64> {
+    let gpu = gpu_processes();
+    if gpu.is_empty() {
+        return HashMap::new();
+    }
+    let map = build_ppid_map();
+    let all_pane_pids = crate::tmux::list_all_pane_pids();
+    let mut owners: HashMap<u32, String> = HashMap::new();
+    for (name, pane_pids) in all_pane_pids.iter() {
+        for pid in descendants(pane_pids, &map) {
+            owners.insert(pid, name.clone());
+        }
+    }
+    let mut by_session: HashMap<String, u64> = HashMap::new();
+    for (pid, mem) in gpu {
+        if let Some(session) = owners.get(&pid) {
+            *by_session.entry(session.clone()).or_insert(0) += mem;
+        }
+    }
+    by_session
+}
+
 /// CPU + memory for a single tmux session: sum over all descendants of the
 /// session's pane processes.
 pub fn session_resources(session_name: &str) -> SessionResources {

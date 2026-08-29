@@ -70,13 +70,18 @@ Inside the TUI (defaults):
 | Key | Action |
 |-----|--------|
 | `↑/↓`, `j`/`k` | Navigate |
-| `Enter` | Open / switch to the selected session |
-| `/` | Search |
-| `a` | Context menu (new session, task, review, push, PR, merge, …) |
-| `p` | Add project |
-| ` ` | Toggle collapse |
-| `t` / `Z` | Cycle theme / toggle archive view |
-| `q`, `Esc` | Quit / cancel |
+ | `Enter` | Open / switch to the selected session |
+ | `/` | Search |
+ | `a` | Context menu (new session, task, review, push, PR, merge, …) |
+ | `h` | Resource panel (per-session CPU / mem / GPU) |
+ | `p` | Add project |
+ | ` ` | Toggle collapse |
+ | `t` / `Z` | Cycle theme / toggle archive view |
+ | `q`, `Esc` | Quit / cancel |
+
+On a session, the context menu (`a`) also offers **Send message** (`s`, types
+and submits a reply to the agent) and **Approve** (`a`, sends `y` to accept a
+pending permission prompt).
 
 Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
 `keybindings.example.toml` in this repo.
@@ -90,21 +95,23 @@ Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
   finished (Claude Code, OpenCode, Codex, Pi)
 - OpenCode harness
 - Diff review via `hunk`
-- Per-session CPU/mem + GPU usage (`RES` column)
+- Per-session CPU/mem + GPU usage (`RES` column) and a resource panel overlay
+  (per-session CPU / mem / GPU with totals, `h`)
+- Quick-reply and approval from the TUI (send a message, or accept a permission
+  prompt)
+- Auto-close sessions (idle + finished, dirty-worktree safeguard; opt-in)
+- OS notifications + bell when a session needs a decision
+- Authoritative agent hooks (Claude / OpenCode / Codex) via the daemon
+- Project auto-discovery (`showrunner discover` — git / zoxide / ghq)
 - Daemon with HTTP + SSE on localhost, plus a small web UI
 - tmux status-bar alert badge (count of sessions waiting on you)
 - `showrunner` CLI to manage and talk to sessions from inside one
-  (`list`, `task`, `session`, `ask`, `send`, `output`)
+  (`list`, `task`, `session`, `ask`, `send`, `output`, `discover`)
 
 ### Roadmap
 
 - TUI consuming the daemon's SSE directly (instead of its own worker)
-- Auto-close sessions (idle + finished, dirty-worktree safeguard)
-- OS notifications + bell
-- Authoritative agent hooks (Claude / OpenCode / Codex)
-- Quick-reply and approval flows from the TUI
-- Resource panel in a tmux popup
-- Project auto-discovery (git / zoxide / ghq)
+- Per-agent restart from the TUI (run-command sessions already support it)
 
 ## Configuration
 

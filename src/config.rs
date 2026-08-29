@@ -90,6 +90,12 @@ fn cm_add_task_with_agent() -> char {
 fn cm_new_session_with_agent() -> char {
     'S'
 }
+fn cm_send_message() -> char {
+    's'
+}
+fn cm_approve() -> char {
+    'a'
+}
 fn kb_toggle_archive_view() -> char {
     'Z'
 }
@@ -99,6 +105,10 @@ fn kb_search() -> char {
 
 fn kb_cycle_theme() -> char {
     't'
+}
+
+fn kb_resources() -> char {
+    'h'
 }
 
 fn is_false(b: &bool) -> bool {
@@ -166,6 +176,13 @@ pub struct ContextMenuKeyBindings {
     /// New session, picking the agent harness first (default: S)
     #[serde(default = "cm_new_session_with_agent")]
     pub new_session_with_agent: char,
+    /// Send a typed message to the selected session (default: s)
+    #[serde(default = "cm_send_message")]
+    pub send_message: char,
+    /// Approve the selected session's pending permission prompt (sends "y")
+    /// (default: a)
+    #[serde(default = "cm_approve")]
+    pub approve: char,
 }
 
 impl Default for ContextMenuKeyBindings {
@@ -190,6 +207,8 @@ impl Default for ContextMenuKeyBindings {
             run: cm_run(),
             add_task_with_agent: cm_add_task_with_agent(),
             new_session_with_agent: cm_new_session_with_agent(),
+            send_message: cm_send_message(),
+            approve: cm_approve(),
         }
     }
 }
@@ -226,6 +245,9 @@ pub struct KeyBindings {
     /// Cycle the color theme (default: t)
     #[serde(default = "kb_cycle_theme")]
     pub cycle_theme: char,
+    /// Toggle the per-session resource (CPU/mem/GPU) panel (default: h)
+    #[serde(default = "kb_resources")]
+    pub resources: char,
     /// Context menu action keybindings
     #[serde(default)]
     pub context_menu_keys: ContextMenuKeyBindings,
@@ -243,6 +265,7 @@ impl Default for KeyBindings {
             toggle_archive_view: kb_toggle_archive_view(),
             search: kb_search(),
             cycle_theme: kb_cycle_theme(),
+            resources: kb_resources(),
             context_menu_keys: ContextMenuKeyBindings::default(),
         }
     }
@@ -1225,6 +1248,19 @@ mod tests {
         // An existing config without the key deserializes to the default.
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.review_tool, ReviewTool::Hunk);
+    }
+
+    #[test]
+    fn keybindings_defaults_include_new_keys() {
+        let kb = KeyBindings::default();
+        assert_eq!(kb.resources, 'h');
+        assert_eq!(kb.context_menu_keys.send_message, 's');
+        assert_eq!(kb.context_menu_keys.approve, 'a');
+        // An existing keybindings file without the new keys deserializes to defaults.
+        let kb: KeyBindings = toml::from_str("").unwrap();
+        assert_eq!(kb.resources, 'h');
+        assert_eq!(kb.context_menu_keys.send_message, 's');
+        assert_eq!(kb.context_menu_keys.approve, 'a');
     }
 
     #[test]
