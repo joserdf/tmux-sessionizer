@@ -132,6 +132,9 @@ pub enum ContextAction {
     SendMessage,
     /// Approve the selected session's pending permission prompt (sends "y").
     Approve,
+    /// Restart the selected session's agent (kill + relaunch, resuming the
+    /// conversation).
+    Restart,
 }
 
 /// Where a "Run" action should execute: the owning project (whose `run_command`
@@ -1250,6 +1253,11 @@ impl App {
                         action: ContextAction::Approve,
                     },
                     ContextMenuItem {
+                        key: cm.restart,
+                        label: "Restart (resumes)",
+                        action: ContextAction::Restart,
+                    },
+                    ContextMenuItem {
                         key: cm.terminal,
                         label: "Terminal",
                         action: ContextAction::Terminal,
@@ -1317,6 +1325,7 @@ impl App {
             ContextAction::RunKill => self.run_kill(),
             ContextAction::SendMessage => self.start_send_message(),
             ContextAction::Approve => self.approve_session(),
+            ContextAction::Restart => self.restart_session(),
             ContextAction::PickAgent(agent) => self.confirm_agent_picker(agent),
         }
     }
@@ -1935,7 +1944,7 @@ impl App {
             self.status_message = Some("Select a session to approve".into());
             return;
         };
-        self.start_op(&format!("Approving {name}..."), move || {
+          self.start_op(&format!("Approving {name}..."), move || {
             match crate::tmux::send_text(&name, "y", true) {
                 Ok(()) => OpResult {
                     message: format!("Sent approval to '{name}'"),
@@ -1945,6 +1954,41 @@ impl App {
                 Err(e) => OpResult {
                     message: format!("Approve failed: {e}"),
                     rebuild: false,
+                    reload_config: false,
+                },
+            }
+        });
+    }
+
+    /// Restart the selected session's agent: kill the tmux session (preserving
+    /// the worktree, branch, and record) and relaunch the agent from its
+    /// record, resuming the conversation. Reuses the same recreation path the
+    /// app uses for startup restore / unarchive.
+    pub fn restart_session(&mut self) {
+        let Some(name) = self.selected_session_name() else {
+            self.status_message = Some("Select a session to restart".into());
+            return;
+        };
+        // Resolve the record up front so a missing/stale one gives a clear
+        // message instead of killing the session for no reason.
+        let record = config::load_sessions().get(&name).cloned();
+        let Some(record) = record else {
+            self.status_message =
+                Some(format!("Cannot restart '{name}' — no session record found"));
+            return;
+        };
+        self.start_op(&format!("Restarting {name}..."), move || {
+            // Kill the tmux session only — keep worktree, branch, record intact.
+            let _ = crate::tmux::kill_session_only(&name);
+            match crate::tmux::recreate_session(&name, &record) {
+                Ok(_) => OpResult {
+                    message: format!("Restarted '{name}' (conversation resumed)"),
+                    rebuild: true,
+                    reload_config: false,
+                },
+                Err(e) => OpResult {
+                    message: format!("Restart failed for '{name}': {e}"),
+                    rebuild: true,
                     reload_config: false,
                 },
             }

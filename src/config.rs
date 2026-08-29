@@ -96,6 +96,9 @@ fn cm_send_message() -> char {
 fn cm_approve() -> char {
     'a'
 }
+fn cm_restart() -> char {
+    'R'
+}
 fn kb_toggle_archive_view() -> char {
     'Z'
 }
@@ -183,6 +186,10 @@ pub struct ContextMenuKeyBindings {
     /// (default: a)
     #[serde(default = "cm_approve")]
     pub approve: char,
+    /// Restart the selected session's agent (kill + relaunch, resuming the
+    /// conversation) (default: R)
+    #[serde(default = "cm_restart")]
+    pub restart: char,
 }
 
 impl Default for ContextMenuKeyBindings {
@@ -209,6 +216,7 @@ impl Default for ContextMenuKeyBindings {
             new_session_with_agent: cm_new_session_with_agent(),
             send_message: cm_send_message(),
             approve: cm_approve(),
+            restart: cm_restart(),
         }
     }
 }
@@ -1256,11 +1264,13 @@ mod tests {
         assert_eq!(kb.resources, 'h');
         assert_eq!(kb.context_menu_keys.send_message, 's');
         assert_eq!(kb.context_menu_keys.approve, 'a');
+        assert_eq!(kb.context_menu_keys.restart, 'R');
         // An existing keybindings file without the new keys deserializes to defaults.
         let kb: KeyBindings = toml::from_str("").unwrap();
         assert_eq!(kb.resources, 'h');
         assert_eq!(kb.context_menu_keys.send_message, 's');
         assert_eq!(kb.context_menu_keys.approve, 'a');
+        assert_eq!(kb.context_menu_keys.restart, 'R');
     }
 
     #[test]

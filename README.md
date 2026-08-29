@@ -101,6 +101,8 @@ Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
   (per-session CPU / mem / GPU with totals, `h`)
 - Quick-reply and approval from the TUI (send a message, or accept a permission
   prompt)
+- Restart an agent session from the TUI (kill + relaunch, resuming the
+  conversation; preserves worktree/branch)
 - Auto-close sessions (idle + finished, dirty-worktree safeguard; opt-in)
 - OS notifications + bell when a session needs a decision
 - Authoritative agent hooks (Claude / OpenCode / Codex) via the daemon
@@ -111,10 +113,6 @@ Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
 - tmux status-bar alert badge (count of sessions waiting on you)
 - `showrunner` CLI to manage and talk to sessions from inside one
   (`list`, `task`, `session`, `ask`, `send`, `output`, `discover`)
-
-### Roadmap
-
-- Per-agent restart from the TUI (run-command sessions already support it)
 
 ## Configuration
 
