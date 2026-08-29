@@ -393,3 +393,24 @@ live `opencode serve` run to check the process `comm` name.
 - Empirical verification was possible and encouraging: the installed opencode
   npm binary self-reports `comm=opencode`, so the agent-liveness probe works for
   current versions (see L10 for the older-install caveat).
+
+---
+
+## Resolution (post-review)
+
+Fixed across commits `44b9571` (feat) + `a78f29b` (fix): **all 4 High (H1–H4),
+M1, M2, M3, L1–L10, N3, N4, N5.**
+
+Not addressed (intentional):
+- **M4** — lives in `scripts/lib/ui.sh` (per-session alert badge reading a 6th
+  `opencode-hook.state` field). That file is pre-existing legacy bash not part
+  of the Rust integration and not referenced by the new `sessionizer.tmux`
+  bootstrap (which uses the daemon-written `status.cache` instead). Needs a
+  separate decision: delete the superseded legacy bash TUI, or reconcile the
+  `opencode-hook.state` schema.
+- **N1 / N2** — cosmetic (`mem_human` unit-constant naming; `CPU {:.0}%`
+  half-to-even rounding). Left as-is.
+
+Verification: `cargo test` 116 pass; SSE idle emits ~1 state/6s (was ~12);
+daemon `status.cache` written; recycled-PID rejected; runtime resource test
+exercises a real CPU burner.
