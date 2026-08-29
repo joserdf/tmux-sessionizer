@@ -14,8 +14,10 @@ The old pure-bash session picker is gone; bash is now a thin tmux bootstrap.
 - **Daemon** — `showrunner serve` (Rust/tokio/axum) owns the session/agent
   state, serves HTTP + SSE on localhost (default `127.0.0.1:7878`), and writes
   the status-bar alert count. It also serves a small web UI.
-- **TUI** — `showrunner` (Ratatui). It currently runs its own in-process
-  background worker; consuming the daemon's SSE directly is on the roadmap.
+- **TUI** — `showrunner` (Ratatui). It consumes the daemon's SSE
+  (`/events/worker`) as its live data source, so the daemon's worker is the
+  single source of truth across TUI, web and mobile. When the daemon isn't
+  running (e.g. a standalone TUI), it falls back to its own in-process worker.
 - **Bootstrap** — `sessionizer.tmux` (bash) wires tmux keybindings and the
   daemon lifecycle. That is its entire job.
 
@@ -104,13 +106,14 @@ Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
 - Authoritative agent hooks (Claude / OpenCode / Codex) via the daemon
 - Project auto-discovery (`showrunner discover` — git / zoxide / ghq)
 - Daemon with HTTP + SSE on localhost, plus a small web UI
+- TUI consumes the daemon's SSE (`/events/worker`) as its live data source,
+  with an in-process worker fallback when the daemon isn't running
 - tmux status-bar alert badge (count of sessions waiting on you)
 - `showrunner` CLI to manage and talk to sessions from inside one
   (`list`, `task`, `session`, `ask`, `send`, `output`, `discover`)
 
 ### Roadmap
 
-- TUI consuming the daemon's SSE directly (instead of its own worker)
 - Per-agent restart from the TUI (run-command sessions already support it)
 
 ## Configuration

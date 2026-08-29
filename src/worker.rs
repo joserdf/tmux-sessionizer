@@ -24,7 +24,7 @@ pub struct WorkerHints {
 }
 
 /// Data produced by the background worker for the UI to consume.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkerUpdate {
     pub sessions: Vec<TmuxSession>,
     pub statuses: HashMap<String, SessionStatus>,
@@ -76,6 +76,124 @@ impl Worker {
 
         Worker { hints, latest }
     }
+
+    /// The daemon's raw-`WorkerUpdate` SSE URL, from `SESSIONIZER_PORT`
+    /// (default 7878).
+    pub fn daemon_url() -> String {
+        let port = std::env::var("SESSIONIZER_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(7878);
+        format!("http://127.0.0.1:{port}/events/worker")
+    }
+
+    /// Cheap reachability probe for the daemon (a TCP connect with a short
+    /// timeout). Used to pick remote (daemon) vs. local worker without an HTTP
+    /// round-trip.
+    pub fn daemon_reachable() -> bool {
+        let port = std::env::var("SESSIONIZER_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(7878);
+        std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(700),
+        )
+        .is_ok()
+    }
+
+    /// Run this worker as a CLIENT of the daemon's SSE stream instead of
+    /// spawning a local worker. A background thread (its own tokio runtime)
+    /// reads `/events/worker` and writes each `WorkerUpdate` into `latest`,
+    /// reconnecting with backoff if the connection drops. `hints` is unused in
+    /// remote mode but kept for a uniform `Worker` shape.
+    pub fn connect_remote(url: &str) -> Self {
+        let hints = Arc::new(Mutex::new(WorkerHints {
+            tasks: Vec::new(),
+            project_paths: Vec::new(),
+        }));
+        let latest = Arc::new(Mutex::new(None));
+        let url = url.to_string();
+        let latest_clone = latest.clone();
+        thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                rt.block_on(sse_client(url, latest_clone));
+            }
+        });
+        Worker { hints, latest }
+    }
+}
+
+/// Read the daemon's raw-`WorkerUpdate` SSE stream into `latest`, reconnecting
+/// with backoff on any drop so a daemon restart recovers transparently. Runs
+/// forever (the TUI's process lifetime bounds it).
+async fn sse_client(url: String, latest: Arc<Mutex<Option<WorkerUpdate>>>) {
+    use futures_util::StreamExt;
+    let client = match reqwest::Client::builder().build() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let mut backoff = Duration::from_millis(500);
+    loop {
+        let ok = match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                backoff = Duration::from_millis(500);
+                let mut stream = resp.bytes_stream();
+                let mut buf: Vec<u8> = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = match chunk {
+                        Ok(b) => b,
+                        Err(_) => break,
+                    };
+                    buf.extend_from_slice(&chunk);
+                    // Pull out each complete SSE frame (delimited by a blank line).
+                    while let Some(end) = find_frame_end(&buf) {
+                        let frame: Vec<u8> = buf.drain(..end).collect();
+                        if let Some(update) = parse_sse_frame(&String::from_utf8_lossy(&frame)) {
+                            *latest.lock().unwrap() = Some(update);
+                        }
+                    }
+                }
+                true
+            }
+            _ => false,
+        };
+        if !ok {
+            // Couldn't (re)connect: back off and retry.
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(5));
+        }
+    }
+}
+
+/// Index (exclusive end) of the first SSE frame in `buf` — i.e., just past the
+/// first `\n\n`. Returns None while an incomplete frame is buffered.
+fn find_frame_end(buf: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i + 1 < buf.len() {
+        if buf[i] == b'\n' && buf[i + 1] == b'\n' {
+            return Some(i + 2);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Extract the `WorkerUpdate` from a single SSE frame's `data:` lines.
+fn parse_sse_frame(frame: &str) -> Option<WorkerUpdate> {
+    let mut data = String::new();
+    for line in frame.lines() {
+        if let Some(d) = line.strip_prefix("data:") {
+            data.push_str(d.trim_start());
+        }
+    }
+    if data.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<WorkerUpdate>(&data).ok()
 }
 
 fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUpdate>>>) {
@@ -415,5 +533,66 @@ fn auto_close_step(
                 acted.remove(name);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sse_client_tests {
+    use super::*;
+    use crate::tmux::TmuxSession;
+
+    fn sample_update() -> WorkerUpdate {
+        WorkerUpdate {
+            sessions: vec![TmuxSession {
+                name: "cm__proj__task__s1".to_string(),
+                project_name: "proj".to_string(),
+                task_name: "task".to_string(),
+                session_name: "s1".to_string(),
+            }],
+            statuses: Default::default(),
+            diff_stats: Default::default(),
+            task_diff_stats: Default::default(),
+            session_branches: Default::default(),
+            session_agents: Default::default(),
+            pr_urls: Default::default(),
+            project_branches: Default::default(),
+            run_sessions: Default::default(),
+            resources: Default::default(),
+            gpu: vec![(4242, 512)],
+            generation: 7,
+        }
+    }
+
+    #[test]
+    fn workerupdate_round_trips() {
+        let u = sample_update();
+        let json = serde_json::to_string(&u).unwrap();
+        let back: WorkerUpdate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.generation, 7);
+        assert_eq!(back.sessions.len(), 1);
+        assert_eq!(back.sessions[0].name, "cm__proj__task__s1");
+        assert_eq!(back.gpu, vec![(4242, 512)]);
+    }
+
+    #[test]
+    fn parse_sse_frame_extracts_worker_update() {
+        let json = serde_json::to_string(&sample_update()).unwrap();
+        let frame = format!("event: worker\ndata: {json}\n\n");
+        let parsed = parse_sse_frame(&frame).expect("should parse");
+        assert_eq!(parsed.generation, 7);
+        assert_eq!(parsed.sessions[0].session_name, "s1");
+    }
+
+    #[test]
+    fn parse_sse_frame_ignores_non_data_frames() {
+        assert!(parse_sse_frame(": keep-alive\n\n").is_none());
+        assert!(parse_sse_frame("\n").is_none());
+    }
+
+    #[test]
+    fn find_frame_end_locates_blank_line() {
+        assert_eq!(find_frame_end(b"data: x"), None);
+        assert_eq!(find_frame_end(b"data: x\n\n"), Some(9));
+        assert_eq!(find_frame_end(b"data: a\n\ndata: b"), Some(9));
     }
 }

@@ -64,6 +64,7 @@ pub fn run(bind: &str) -> Result<()> {
         .route("/icon.png", get(icon))
         .route("/api/state", get(api_state))
         .route("/events", get(api_events))
+        .route("/events/worker", get(api_events_worker))
         .route("/api/sessions/{name}/output", get(api_output))
         .route("/api/diff", get(api_diff))
         .route("/api/sessions/{name}/send", post(api_send))
@@ -315,6 +316,55 @@ async fn api_events(
         }
     };
 
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// SSE stream of the raw `WorkerUpdate` — the TUI's native format. The web UI
+/// consumes `/events` (the `build_state` shape); the TUI consumes this so the
+/// daemon's worker is its single source of truth (no duplicate local worker).
+/// Emits only when the serialized update changes.
+async fn api_events_worker(
+    State(state): State<Arc<ServerState>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = async_stream::stream! {
+        let mut timer = interval(Duration::from_millis(500));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_gen: u64 = 0;
+        let mut last_json: String = String::new();
+        loop {
+            timer.tick().await;
+            let update_opt = {
+                let latest = state.worker.latest.lock().unwrap();
+                latest.clone()
+            };
+            if let Some(u) = update_opt {
+                if u.generation == last_gen {
+                    continue;
+                }
+                let update_gen = u.generation;
+                let state_clone = Arc::clone(&state);
+                let res = tokio::task::spawn_blocking(move || {
+                    // Keep the daemon's worker hints fresh (task/project info) so
+                    // the raw WorkerUpdate is fully populated even when the only
+                    // client is the TUI on /events/worker (mirrors /events).
+                    let cfg = Config::load().ok()?;
+                    sync_hints(&state_clone.worker, &cfg);
+                    serde_json::to_string(&u).ok()
+                })
+                .await;
+                if let Ok(Some(json)) = res {
+                    if json != last_json {
+                        let event = Event::default().event("worker").data(json.clone());
+                        last_json = json;
+                        last_gen = update_gen;
+                        yield Ok(event);
+                    } else {
+                        last_gen = update_gen;
+                    }
+                }
+            }
+        }
+    };
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 

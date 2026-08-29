@@ -18,7 +18,7 @@ pub fn is_adhoc_marker(s: &str) -> bool {
     sanitize(s).eq_ignore_ascii_case(ADHOC_MARKER)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SessionStatus {
     Running,
     WaitingForInput,
@@ -37,7 +37,7 @@ impl SessionStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TmuxSession {
     pub name: String,
     pub project_name: String,
@@ -1918,7 +1918,7 @@ fn find_worktree_for_branch(project_path: &str, branch: &str) -> Option<String> 
     None
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiffStats {
     pub added: usize,
     pub removed: usize,

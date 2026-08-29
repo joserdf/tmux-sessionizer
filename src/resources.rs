@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// CPU + memory usage attributed to a tmux session.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionResources {
     /// Total CPU across the session's process tree, as a percentage of a
     /// single core (can exceed 100 on multi-core work).

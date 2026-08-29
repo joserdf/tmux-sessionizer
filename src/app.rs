@@ -578,6 +578,14 @@ impl App {
         }
         let (tx, rx) = mpsc::channel();
         let (review_tx, review_rx) = mpsc::channel();
+        // Prefer the daemon's worker via SSE (single source of truth for TUI +
+        // web + mobile); fall back to a local worker when the daemon isn't
+        // running (standalone TUI use).
+        let worker = if Worker::daemon_reachable() {
+            Worker::connect_remote(&Worker::daemon_url())
+        } else {
+            Worker::spawn()
+        };
         let mut app = App {
             config,
             keybindings,
@@ -617,7 +625,7 @@ impl App {
             review_candidates: Vec::new(),
             review_selected: 0,
             tick: 0,
-            worker: Worker::spawn(),
+            worker,
             context_menu_items: vec![],
             context_menu_selected: 0,
             view_archived: false,
