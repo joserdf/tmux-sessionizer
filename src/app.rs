@@ -853,26 +853,28 @@ impl App {
 
     /// Tell the worker what is selected.
     pub fn sync_worker_hints(&self) {
-        let tasks: Vec<TaskInfo> = self
-            .config
-            .projects
-            .iter()
-            .flat_map(|p| {
-                p.tasks.iter().map(|t| TaskInfo {
-                    project_name: p.name.clone(),
-                    project_path: p.path.clone(),
-                    branch: t.branch.clone(),
-                    base_branch: t.base_branch().to_string(),
-                })
-            })
-            .collect();
-
-        let project_paths: Vec<(String, String)> = self
-            .config
-            .projects
-            .iter()
-            .map(|p| (p.name.clone(), p.path.clone()))
-            .collect();
+        // Dedup so the worker never computes the same branch diff / PR lookup
+        // twice: branch names can collide across projects, and project names are
+        // the identity of a project_path entry. No-op on well-formed configs.
+        let mut seen_tasks: HashSet<(String, String)> = HashSet::new();
+        let mut seen_projects: HashSet<String> = HashSet::new();
+        let mut tasks: Vec<TaskInfo> = Vec::new();
+        let mut project_paths: Vec<(String, String)> = Vec::new();
+        for p in &self.config.projects {
+            if seen_projects.insert(p.name.clone()) {
+                project_paths.push((p.name.clone(), p.path.clone()));
+            }
+            for t in &p.tasks {
+                if seen_tasks.insert((p.path.clone(), t.branch.clone())) {
+                    tasks.push(TaskInfo {
+                        project_name: p.name.clone(),
+                        project_path: p.path.clone(),
+                        branch: t.branch.clone(),
+                        base_branch: t.base_branch().to_string(),
+                    });
+                }
+            }
+        }
 
         if let Ok(mut hints) = self.worker.hints.lock() {
             hints.tasks = tasks;
@@ -1955,12 +1957,24 @@ impl App {
     }
 
     /// Approve the selected session's pending permission prompt (sends "y").
+    /// Gated on the session actually being in `WaitingForPermission`: sending a
+    /// bare "y" + Enter into a running or idle agent would inject a stray
+    /// command into its input.
     pub fn approve_session(&mut self) {
         let Some(name) = self.selected_session_name() else {
             self.status_message = Some("Select a session to approve".into());
             return;
         };
-          self.start_op(&format!("Approving {name}..."), move || {
+        let Some(status) = self.session_statuses.get(&name) else {
+            self.status_message = Some("No status available for that session".into());
+            return;
+        };
+        if *status != SessionStatus::WaitingForPermission {
+            self.status_message =
+                Some("Session is not waiting for permission to approve".into());
+            return;
+        }
+        self.start_op(&format!("Approving {name}..."), move || {
             match crate::tmux::send_text(&name, "y", true) {
                 Ok(()) => OpResult {
                     message: format!("Sent approval to '{name}'"),

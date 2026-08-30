@@ -315,7 +315,12 @@ fn draw_floating_input(f: &mut Frame, app: &App, area: Rect) {
 /// `App::toggle_resources`).
 fn draw_resource_panel(f: &mut Frame, app: &App, area: Rect) {
     let width = (area.width * 75 / 100).max(50);
-    let height = (area.height * 85 / 100).max(6);
+    // Size the panel to its content (header + one row per session + blank +
+    // total) like the other modal overlays, instead of a fixed 85% height. A
+    // fixed large box leaves a big `Clear`-ed (terminal default-bg) region when
+    // few sessions exist, and clips the TOTAL row when many do.
+    let content_rows = app.sessions.len() as u16 + 3;
+    let height = (content_rows + 2).clamp(6, area.height);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let rect = Rect { x, y, width, height };

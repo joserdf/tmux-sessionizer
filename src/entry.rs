@@ -93,6 +93,9 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         InputMode::AddTaskPrompt
                             | InputMode::AddSessionPrompt
                             | InputMode::MergeCommitMessage
+                            // SendMessage buffer is multi-line (Alt+Enter inserts a
+                            // newline), so pasted newlines are preserved too.
+                            | InputMode::SendMessage
                     );
                     for c in data.chars() {
                         match c {

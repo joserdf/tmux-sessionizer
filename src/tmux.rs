@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Result, bail};
 
@@ -642,12 +643,18 @@ pub fn recreate_session(tmux_name: &str, record: &crate::config::SessionRecord) 
 
 /// Insert text into the claude pane's input buffer as a bracketed paste.
 /// If `submit` is true, also presses Enter afterwards.
+/// Monotonic counter for unique paste-buffer names. `send_text` can be invoked
+/// concurrently (different sessions, or a queued op racing the worker), so a
+/// fixed buffer name would let one call's `load-buffer` clobber another's text
+/// before its `paste-buffer` runs. A per-call unique name avoids that.
+static SEND_TEXT_SEQ: AtomicU64 = AtomicU64::new(0);
+
 pub fn send_text(session_name: &str, text: &str, submit: bool) -> Result<()> {
     let target = format!("{session_name}:0");
-    let buf_name = "cm_comment_paste";
+    let buf_name = format!("cm_paste_{}", SEND_TEXT_SEQ.fetch_add(1, Ordering::Relaxed));
 
     let mut child = Command::new("tmux")
-        .args(["load-buffer", "-b", buf_name, "-"])
+        .args(["load-buffer", "-b", buf_name.as_str(), "-"])
         .stdin(Stdio::piped())
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
@@ -660,7 +667,7 @@ pub fn send_text(session_name: &str, text: &str, submit: bool) -> Result<()> {
 
     // -p: bracketed paste, -d: delete buffer after pasting.
     let out = Command::new("tmux")
-        .args(["paste-buffer", "-d", "-p", "-b", buf_name, "-t", &target])
+        .args(["paste-buffer", "-d", "-p", "-b", buf_name.as_str(), "-t", &target])
         .output()?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
