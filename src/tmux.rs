@@ -2912,4 +2912,37 @@ Some transcript output.\n\
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Fail-safe dirty check (the auto-close safety property): a clean repo
+    /// reads `false`; an untracked file makes it `true`; and ANY path we can't
+    /// verify (a missing dir, so `git` fails) is treated as `true` — auto-close
+    /// must never close a session it can't confirm clean.
+    #[test]
+    fn worktree_dirty_failsafe_clean_dirty_and_error() {
+        let dir = std::env::temp_dir().join(format!("sr_failsafe_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+
+        // A missing path (git can't run there) is treated as dirty.
+        let missing = dir.join("nope");
+        assert!(worktree_dirty_failsafe(&missing.to_string_lossy()));
+
+        // Empty repo: nothing to report -> clean.
+        let p = dir.to_string_lossy().to_string();
+        assert!(!worktree_dirty_failsafe(&p), "empty repo should read clean");
+
+        // An untracked file -> dirty.
+        std::fs::write(dir.join("scratch.txt"), "x").unwrap();
+        assert!(worktree_dirty_failsafe(&p), "untracked file should read dirty");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

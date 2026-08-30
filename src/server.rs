@@ -401,6 +401,33 @@ mod sse_tests {
     }
 }
 
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    /// Local loopback (IPv4 `127/8` and IPv6 `::1`) is the only allowed hook
+    /// source.
+    #[test]
+    fn hook_source_allows_loopback_v4_and_v6() {
+        assert!(hook_source_allowed(std::net::SocketAddr::from(([127, 0, 0, 1], 55555))));
+        assert!(hook_source_allowed(std::net::SocketAddr::from(([127, 0, 0, 8], 1))));
+        // ::1 as [u8; 8]
+        assert!(hook_source_allowed(std::net::SocketAddr::from((
+            [0, 0, 0, 0, 0, 0, 0, 1],
+            2
+        ))));
+    }
+
+    /// Anything else — LAN, private, CGNAT/tailnet, public — is rejected.
+    #[test]
+    fn hook_source_rejects_non_loopback() {
+        assert!(!hook_source_allowed(std::net::SocketAddr::from(([10, 0, 0, 1], 55555))));
+        assert!(!hook_source_allowed(std::net::SocketAddr::from(([192, 168, 1, 5], 1))));
+        assert!(!hook_source_allowed(std::net::SocketAddr::from(([100, 64, 0, 1], 1))));
+        assert!(!hook_source_allowed(std::net::SocketAddr::from(([8, 8, 8, 8], 1))));
+    }
+}
+
 /// Reject session names that don't look like showrunner tmux sessions so
 /// the API can't be used to poke at arbitrary tmux targets.
 fn validate_session_name(name: &str) -> Result<(), ApiError> {
@@ -549,6 +576,15 @@ async fn api_kill(Path(name): Path<String>) -> Result<StatusCode, ApiError> {
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The single policy point deciding whether a peer may POST `/api/hook`. Hook
+/// ingestion is local-only (agent hooks curl `127.0.0.1`), so this must accept
+/// BOTH the IPv4 (`127.0.0.0/8`) and IPv6 (`::1`) loopback ranges and reject
+/// everything else (LAN / private / public / tailnet) — otherwise an exposed
+/// daemon could be fed forged hook events.
+fn hook_source_allowed(peer: std::net::SocketAddr) -> bool {
+    peer.ip().is_loopback()
+}
+
 /// Ingest a normalized agent hook event, POSTed by an agent's hook script.
 /// Body: `{ "agent": "claude"|"opencode"|"codex", ...agent-specific payload }`.
 /// The event is normalized and kept (bounded) for `GET /api/hook-events`.
@@ -561,7 +597,7 @@ async fn api_hook(
     // 127.0.0.1). Reject non-loopback sources so an exposed daemon (e.g. bound to
     // a tailnet IP) can't be fed forged hook events that manipulate session
     // status or trigger auto-close.
-    if !peer.ip().is_loopback() {
+    if !hook_source_allowed(peer) {
         return Ok(StatusCode::FORBIDDEN);
     }
     let agent = body.get("agent").and_then(Value::as_str).unwrap_or("");
