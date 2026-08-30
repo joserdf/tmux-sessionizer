@@ -21,17 +21,8 @@ if not isinstance(ev, dict):
     sys.exit(0)
 
 ev["agent"] = "claude"
-
-# Claude's Notification stdin may lack a matcher; infer one from the message.
-# If it cannot be classified, leave it unset (the daemon drops the event).
-if ev.get("hook_event_name") == "Notification" and not ev.get("matcher"):
-    msg = str(ev.get("message") or "").lower()
-    if "permission" in msg:
-        ev["matcher"] = "permission_prompt"
-    elif any(w in msg for w in ("complet", "done", "finished", "stopped")):
-        ev["matcher"] = "agent_completed"
-    elif any(w in msg for w in ("idle", "input", "waiting", "need")):
-        ev["matcher"] = "idle_prompt"
+# The raw payload (including notification_type when present) is forwarded as-is;
+# the daemon normalizes it at the boundary (see hooks::parse_claude_hook).
 
 try:
     req = urllib.request.Request(

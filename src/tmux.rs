@@ -432,7 +432,7 @@ pub fn create_session(
         ])
         .output();
 
-    set_session_agent(&tmux_name, agent);
+    set_session_env(&tmux_name, agent);
 
     if use_worktree {
         let _ = Command::new("tmux")
@@ -495,7 +495,7 @@ pub fn create_adhoc_session(
         ])
         .output();
 
-    set_session_agent(&tmux_name, agent);
+    set_session_env(&tmux_name, agent);
 
     Ok(tmux_name)
 }
@@ -534,7 +534,7 @@ pub fn recreate_adhoc_session(
         ])
         .output();
 
-    set_session_agent(tmux_name, agent);
+    set_session_env(tmux_name, agent);
 
     Ok(tmux_name.to_string())
 }
@@ -623,7 +623,7 @@ pub fn recreate_session(tmux_name: &str, record: &crate::config::SessionRecord) 
         ])
         .output();
 
-    set_session_agent(tmux_name, agent);
+    set_session_env(tmux_name, agent);
 
     if record.use_worktree {
         let _ = Command::new("tmux")
@@ -981,9 +981,16 @@ pub fn run_command_session(label: &str, work_dir: &str, command: &str) -> Result
 
 /// Record which agent runs in the session, for status probing and transcript
 /// trimming after the fact.
-fn set_session_agent(tmux_name: &str, agent: AgentKind) {
+/// Set the per-session showrunner environment: the agent id, and the daemon
+/// port so the plugin's hook script (`post-event.sh`) can reach the daemon even
+/// when `SESSIONIZER_PORT` isn't otherwise in the pane environment.
+fn set_session_env(tmux_name: &str, agent: AgentKind) {
     let _ = Command::new("tmux")
         .args(["set-environment", "-t", tmux_name, "CM_AGENT", agent.id()])
+        .output();
+    let port = std::env::var("SESSIONIZER_PORT").unwrap_or_else(|_| "7878".to_string());
+    let _ = Command::new("tmux")
+        .args(["set-environment", "-t", tmux_name, "SESSIONIZER_PORT", port.as_str()])
         .output();
 }
 
@@ -1335,6 +1342,9 @@ const PLUGIN_SKILL_COMMIT_PUSH_TASK: &str =
     include_str!("../showrunner-plugin/skills/commit-push-task/SKILL.md");
 const PLUGIN_SKILL_MANAGE_SESSIONS: &str =
     include_str!("../showrunner-plugin/skills/manage-sessions/SKILL.md");
+const PLUGIN_HOOKS_JSON: &str = include_str!("../showrunner-plugin/hooks/hooks.json");
+const PLUGIN_HOOKS_POST_EVENT: &str =
+    include_str!("../showrunner-plugin/hooks/post-event.sh");
 
 /// Filesystem path to the installed showrunner plugin directory inside `work_dir`.
 /// This is the path passed to `claude --plugin-dir`.
@@ -1411,10 +1421,18 @@ fn install_showrunner_plugin(work_dir: &str) {
     let _ = fs::create_dir_all(plugin_dir.join(".claude-plugin"));
     let _ = fs::create_dir_all(plugin_dir.join("skills").join("commit-push-task"));
     let _ = fs::create_dir_all(plugin_dir.join("skills").join("manage-sessions"));
+    let _ = fs::create_dir_all(plugin_dir.join("hooks"));
 
     let _ = fs::write(
         plugin_dir.join(".claude-plugin").join("plugin.json"),
         PLUGIN_MANIFEST,
+    );
+    // The manifest references ./hooks/hooks.json — both files must be present or
+    // Claude Code fails to load the plugin (which would also drop the skills).
+    let _ = fs::write(plugin_dir.join("hooks").join("hooks.json"), PLUGIN_HOOKS_JSON);
+    let _ = fs::write(
+        plugin_dir.join("hooks").join("post-event.sh"),
+        PLUGIN_HOOKS_POST_EVENT,
     );
     let _ = fs::write(
         plugin_dir
@@ -2807,5 +2825,44 @@ Some transcript output.\n\
         assert!(result.contains("1. /prime"));
         assert!(result.contains("Task: fix bug"));
         assert!(!result.contains("Skill tool"));
+    }
+
+    /// Regression for C1: the installed plugin must include the hooks files its
+    /// manifest references, or Claude Code fails to load the whole plugin.
+    #[test]
+    fn install_showrunner_plugin_writes_hooks_files() {
+        let dir = std::env::temp_dir().join(format!("sr_plugin_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let work_dir = dir.to_string_lossy().to_string();
+
+        install_showrunner_plugin(&work_dir);
+
+        let plugin_dir = dir.join(".claude/plugins/showrunner");
+        assert!(
+            plugin_dir.join(".claude-plugin/plugin.json").exists(),
+            "manifest missing"
+        );
+        assert!(
+            plugin_dir.join("hooks/hooks.json").exists(),
+            "C1: hooks.json was not installed into the plugin"
+        );
+        assert!(
+            plugin_dir.join("hooks/post-event.sh").exists(),
+            "C1: post-event.sh was not installed into the plugin"
+        );
+        // The manifest's hooks reference must point at a file that exists.
+        let manifest =
+            std::fs::read_to_string(plugin_dir.join(".claude-plugin/plugin.json")).unwrap();
+        assert!(
+            manifest.contains("./hooks/hooks.json"),
+            "manifest should reference hooks.json"
+        );
+        assert!(
+            plugin_dir.join("hooks/hooks.json").exists(),
+            "referenced hooks.json must exist (no dangling ref)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

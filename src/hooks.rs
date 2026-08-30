@@ -31,17 +31,38 @@ pub enum AgentEvent {
     Error(String),
 }
 
-/// Parse a Claude Code `settings.json` hook payload.
+impl AgentEvent {
+    /// The session status this event authoritatively implies, used to remove
+    /// the pane-scrape detection latency (e.g. a permission prompt shows on the
+    /// next tick instead of after the 3-tick stability window). Returns `None`
+    /// when the event carries no status signal.
+    ///
+    /// Note the turn-completed vs. session-ended distinction: a `Stop`/
+    /// `Finished` event means the agent is alive but idle (WaitingForInput),
+    /// while `SessionEnd`/`SessionStopped` means the agent has exited.
+    pub fn status_hint(&self) -> Option<crate::tmux::SessionStatus> {
+        use crate::tmux::SessionStatus;
+        match self {
+            AgentEvent::PermissionRequest => Some(SessionStatus::WaitingForPermission),
+            AgentEvent::NeedsInput | AgentEvent::Idle => Some(SessionStatus::WaitingForInput),
+            AgentEvent::Finished => Some(SessionStatus::WaitingForInput),
+            AgentEvent::SessionStopped => Some(SessionStatus::Finished),
+            AgentEvent::SessionStarted => Some(SessionStatus::Running),
+            AgentEvent::Error(_) => None,
+        }
+    }
+}
+
+/// Parse a Claude Code hook payload.
 ///
-/// Canonical shape:
-///
-/// ```json
-/// {"hook_event_name":"Notification","message":"...","title":"...","matcher":"permission_prompt","session_id":"..."}
-/// ```
-///
-/// `hook_event_name` selects the event; for `Notification` the `matcher`
-/// field disambiguates between permission, completion, and input-needed
-/// states.
+/// Claude sends a JSON object on stdin with `hook_event_name` selecting the
+/// event. `Notification` events carry their type in `notification_type`
+/// (`permission_prompt`, `idle_prompt`, `agent_needs_input`,
+/// `agent_completed`, …); some builds omit that field, so we fall back to a
+/// `matcher` field and finally to the message text. `PermissionRequest` fires
+/// immediately when Claude asks to use a tool — the `Notification`
+/// permission variant only fires after ~6 s of inactivity, so wiring
+/// `PermissionRequest` is what makes the permission alert timely.
 pub fn parse_claude_hook(json: &str) -> Option<AgentEvent> {
     let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
     let event_name = value.get("hook_event_name").and_then(|v| v.as_str())?;
@@ -49,16 +70,53 @@ pub fn parse_claude_hook(json: &str) -> Option<AgentEvent> {
         "SessionStart" => Some(AgentEvent::SessionStarted),
         "SessionEnd" => Some(AgentEvent::SessionStopped),
         "Stop" => Some(AgentEvent::Finished),
-        "Notification" => {
-            let matcher = value.get("matcher").and_then(|v| v.as_str())?;
-            match matcher {
-                "permission_prompt" => Some(AgentEvent::PermissionRequest),
-                "agent_completed" => Some(AgentEvent::Finished),
-                "idle_prompt" | "agent_needs_input" => Some(AgentEvent::NeedsInput),
-                _ => None,
-            }
-        }
+        "PermissionRequest" => Some(AgentEvent::PermissionRequest),
+        "Notification" => classify_notification(&value),
         _ => None,
+    }
+}
+
+/// Map a Claude `Notification` payload to an [`AgentEvent`], trying the
+/// authoritative `notification_type`, then a `matcher` field, then a
+/// best-effort read of the message text. Permission is checked first so a
+/// "stopped"/"done" word in an idle message can't be misread as completion.
+fn classify_notification(value: &serde_json::Value) -> Option<AgentEvent> {
+    if let Some(t) = value
+        .get("notification_type")
+        .or_else(|| value.get("matcher"))
+        .and_then(|v| v.as_str())
+    {
+        return match t {
+            "permission_prompt" => Some(AgentEvent::PermissionRequest),
+            "agent_completed" => Some(AgentEvent::Finished),
+            "idle_prompt" | "agent_needs_input" => Some(AgentEvent::NeedsInput),
+            _ => None,
+        };
+    }
+    let msg = value
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if msg.is_empty() {
+        return None;
+    }
+    if msg.contains("permission") {
+        Some(AgentEvent::PermissionRequest)
+    } else if msg.contains("idle")
+        || msg.contains("waiting")
+        || msg.contains("input")
+        || msg.contains("need")
+    {
+        Some(AgentEvent::NeedsInput)
+    } else if msg.contains("complet")
+        || msg.contains("done")
+        || msg.contains("finished")
+        || msg.contains("stopped")
+    {
+        Some(AgentEvent::Finished)
+    } else {
+        None
     }
 }
 
@@ -159,6 +217,48 @@ mod tests {
     }
 
     #[test]
+    fn claude_notification_uses_notification_type() {
+        // The authoritative field Claude documents; no matcher present.
+        let json = r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Write","notification_type":"permission_prompt","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::PermissionRequest));
+        let json = r#"{"hook_event_name":"Notification","message":"idle","notification_type":"idle_prompt","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::NeedsInput));
+    }
+
+    #[test]
+    fn claude_notification_type_wins_over_stale_matcher() {
+        let json = r#"{"hook_event_name":"Notification","message":"x","notification_type":"permission_prompt","matcher":"agent_completed","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::PermissionRequest));
+    }
+
+    #[test]
+    fn claude_permission_request_event() {
+        // Immediate permission signal (fires before the ~6s Notification).
+        let json = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::PermissionRequest));
+    }
+
+    #[test]
+    fn claude_notification_message_inference_permission_first() {
+        // No notification_type / matcher (the reported Claude bug): infer from
+        // text. "waiting for your permission" has both idle and permission
+        // words — permission must win.
+        let json = r#"{"hook_event_name":"Notification","message":"Waiting for your permission to proceed","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::PermissionRequest));
+    }
+
+    #[test]
+    fn claude_notification_message_inference_idle_and_completed() {
+        let json = r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::NeedsInput));
+        let json = r#"{"hook_event_name":"Notification","message":"Agent finished its task","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::Finished));
+        // Unclassifiable message -> dropped.
+        let json = r#"{"hook_event_name":"Notification","message":"hello there","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), None);
+    }
+
+    #[test]
     fn claude_unknown_event_name_is_none() {
         let json = r#"{"hook_event_name":"UserPromptSubmit","message":"prompt","title":"Prompt","matcher":"","session_id":"abc123"}"#;
         assert_eq!(parse_claude_hook(json), None);
@@ -173,6 +273,27 @@ mod tests {
     fn claude_robust_to_field_order_and_extra_fields() {
         let json = r#"{"session_id":"abc123","extra":42,"hook_event_name":"SessionEnd","nested":{"a":true}}"#;
         assert_eq!(parse_claude_hook(json), Some(AgentEvent::SessionStopped));
+    }
+
+    // --- Status hints (authoritative consumption) ---
+
+    #[test]
+    fn status_hint_mapping() {
+        use crate::tmux::SessionStatus;
+        assert_eq!(
+            AgentEvent::PermissionRequest.status_hint(),
+            Some(SessionStatus::WaitingForPermission)
+        );
+        assert_eq!(AgentEvent::NeedsInput.status_hint(), Some(SessionStatus::WaitingForInput));
+        // A completed turn leaves the agent alive but idle.
+        assert_eq!(AgentEvent::Finished.status_hint(), Some(SessionStatus::WaitingForInput));
+        // The session/agent has actually exited.
+        assert_eq!(
+            AgentEvent::SessionStopped.status_hint(),
+            Some(SessionStatus::Finished)
+        );
+        assert_eq!(AgentEvent::SessionStarted.status_hint(), Some(SessionStatus::Running));
+        assert_eq!(AgentEvent::Error("x".into()).status_hint(), None);
     }
 
     // --- OpenCode ---
