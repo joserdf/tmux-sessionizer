@@ -82,8 +82,10 @@ Inside the TUI (defaults):
  | `q`, `Esc` | Quit / cancel |
 
 On a session, the context menu (`a`) also offers **Send message** (`s`, types
-and submits a reply to the agent) and **Approve** (`a`, sends `y` to accept a
-pending permission prompt).
+and submits a reply to the agent), **Approve** (`a`, sends `y` to accept a
+pending permission prompt — only offered while the session is actually waiting
+for one), and **Restart** (`R`, kills and relaunches the session, resuming the
+conversation).
 
 Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
 `keybindings.example.toml` in this repo.
@@ -104,12 +106,14 @@ Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
 - Restart an agent session from the TUI (kill + relaunch, resuming the
   conversation; preserves worktree/branch)
 - Auto-close sessions (idle + finished, dirty-worktree safeguard; opt-in)
-- OS notifications + bell when a session needs a decision
+- OS notifications when a session needs a decision (permission prompt, etc.)
 - Authoritative agent hooks (Claude / OpenCode / Codex) via the daemon
 - Project auto-discovery (`showrunner discover` — git / zoxide / ghq)
 - Daemon with HTTP + SSE on localhost, plus a small web UI
-- TUI consumes the daemon's SSE (`/events/worker`) as its live data source,
-  with an in-process worker fallback when the daemon isn't running
+- TUI consumes the daemon's SSE (`/events/worker`) as its live data source. When
+  the daemon isn't running at startup, or dies mid-session, the TUI falls back to
+  a local in-process prober (and shows a "daemon down" indicator in the header),
+  so the dashboard keeps updating either way
 - tmux status-bar alert badge (count of sessions waiting on you)
 - `showrunner` CLI to manage and talk to sessions from inside one
   (`list`, `task`, `session`, `ask`, `send`, `output`, `discover`)
