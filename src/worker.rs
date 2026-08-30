@@ -88,13 +88,24 @@ impl Worker {
         // Local mode: the worker is its own source, so it's always "connected"
         // and never remote (no daemon banner).
         let connected = Arc::new(AtomicBool::new(true));
+        // No SSE stream in local mode; the frame clock is never read (fallback
+        // is false). Passed only to keep a uniform worker_loop signature.
+        let last_frame = Arc::new(Mutex::new(Instant::now()));
 
         let hints_clone = hints.clone();
         let latest_clone = latest.clone();
         let inbox_clone = hook_inbox.clone();
         let connected_clone = connected.clone();
+        let last_frame_clone = last_frame.clone();
         thread::spawn(move || {
-            worker_loop(hints_clone, latest_clone, inbox_clone, false, connected_clone)
+            worker_loop(
+                hints_clone,
+                latest_clone,
+                inbox_clone,
+                false,
+                connected_clone,
+                last_frame_clone,
+            )
         });
 
         Worker {
@@ -149,30 +160,47 @@ impl Worker {
         // Unused in remote mode (the daemon's worker owns the hook inbox); kept
         // for a uniform Worker shape.
         let hook_inbox = Arc::new(Mutex::new(VecDeque::new()));
-        // Starts false; the SSE client flips it true once the stream is
-        // delivering and back to false on any drop.
-        let connected = Arc::new(AtomicBool::new(false));
+        // Starts TRUE: connect_remote is only called after daemon_reachable()
+        // succeeded, so the daemon is up and the SSE client is about to open the
+        // stream. The client flips it false on the first failed/dropped connect
+        // (fast on loopback), so a down daemon is still detected quickly — but an
+        // up daemon doesn't flash the "daemon down" banner for the ~0.5 s before
+        // the first frame arrives.
+        let connected = Arc::new(AtomicBool::new(true));
+        // Frame clock shared with the fallback prober: sse_client bumps it on
+        // every received frame (data or keepalive). The prober uses it to spot a
+        // HUNG daemon (TCP open, no frames) that a plain connect check can't see.
+        let last_frame = Arc::new(Mutex::new(Instant::now()));
 
         let url = url.to_string();
         let latest_sse = latest.clone();
         let connected_sse = connected.clone();
+        let last_frame_sse = last_frame.clone();
         thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
             if let Ok(rt) = rt {
-                rt.block_on(sse_client(url, latest_sse, connected_sse));
+                rt.block_on(sse_client(url, latest_sse, connected_sse, last_frame_sse));
             }
         });
 
         // Local fallback prober: idle while the daemon is up, takes over when
-        // the stream drops.
+        // the stream drops (or hangs).
         let latest_fb = latest.clone();
         let connected_fb = connected.clone();
         let hints_fb = hints.clone();
         let inbox_fb = hook_inbox.clone();
+        let last_frame_fb = last_frame.clone();
         thread::spawn(move || {
-            worker_loop(hints_fb, latest_fb, inbox_fb, true, connected_fb)
+            worker_loop(
+                hints_fb,
+                latest_fb,
+                inbox_fb,
+                true,
+                connected_fb,
+                last_frame_fb,
+            )
         });
 
         Worker {
@@ -192,6 +220,7 @@ async fn sse_client(
     url: String,
     latest: Arc<Mutex<Option<WorkerUpdate>>>,
     connected: Arc<AtomicBool>,
+    last_frame: Arc<Mutex<Instant>>,
 ) {
     use futures_util::StreamExt;
     let client = match reqwest::Client::builder().build() {
@@ -216,6 +245,9 @@ async fn sse_client(
                     // Pull out each complete SSE frame (delimited by a blank line).
                     while let Some(end) = find_frame_end(&buf) {
                         let frame: Vec<u8> = buf.drain(..end).collect();
+                        // Any frame — data or keepalive ping — proves the daemon
+                        // is alive; the fallback prober reads this clock.
+                        *last_frame.lock().unwrap() = Instant::now();
                         if let Some(update) = parse_sse_frame(&String::from_utf8_lossy(&frame)) {
                             *latest.lock().unwrap() = Some(update);
                         }
@@ -278,6 +310,7 @@ fn worker_loop(
     hook_inbox: Arc<Mutex<VecDeque<(String, AgentEvent)>>>,
     fallback: bool,
     connected: Arc<AtomicBool>,
+    last_frame: Arc<Mutex<Instant>>,
 ) {
     let mut content_hashes: HashMap<String, u64> = HashMap::new();
     let mut stable_ticks: HashMap<String, u32> = HashMap::new();
@@ -312,13 +345,23 @@ fn worker_loop(
     // session isn't re-scanned by `git status` on every auto-close pass.
     let mut dirty_cache: HashMap<String, (Instant, bool)> = HashMap::new();
 
+    // A hung daemon (TCP open, but no frames — a wedged server task) keeps
+    // `connected` true and would otherwise freeze the dashboard with no banner.
+    // Keepalives arrive at least every ~10 s, so no frame for this long means the
+    // remote is effectively down; the prober takes over.
+    const REMOTE_FRAME_STALE: Duration = Duration::from_secs(25);
+
     loop {
-        // Fallback mode: while the daemon is reachable it owns the data, so the
-        // local prober stays idle (no duplicate tmux probing). The instant the
-        // stream drops, it wakes and takes over.
+        // Fallback mode: while the daemon's stream is live it owns the data, so
+        // the local prober stays idle (no duplicate tmux probing). It takes over
+        // when the stream drops OR hangs (stale frame clock).
         if fallback && connected.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(500));
-            continue;
+            if last_frame.lock().unwrap().elapsed() <= REMOTE_FRAME_STALE {
+                thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+            connected.store(false, Ordering::Relaxed);
+            // fall through to local probing below
         }
 
         let sessions = tmux::list_sessions().unwrap_or_default();
