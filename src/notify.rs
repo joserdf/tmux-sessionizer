@@ -7,6 +7,7 @@
 //! unconditionally without error handling.
 
 use std::process::Command;
+use std::thread;
 
 /// Notifier candidates in precedence order.
 const NOTIFIER_CANDIDATES: [&str; 2] = ["terminal-notifier", "notify-send"];
@@ -65,18 +66,31 @@ pub fn send(n: &Notification) {
     }
 }
 
-/// Launch `binary` with `n`'s args and immediately detach; `true` if the
-/// process spawned, `false` on spawn error.
+/// Launch `binary` with `n`'s args and return `true` if it spawned, `false` on
+/// spawn error.
 ///
-/// We deliberately do NOT wait for the notifier to finish: `send` runs on the
-/// worker's single polling thread, and a wedged notifier (e.g. a stuck D-Bus
-/// session bus) must not be able to stall status polling, auto-close, or
-/// permission handling. Delivery is best-effort; exit status is irrelevant.
+/// We deliberately do NOT wait for the notifier on the caller's thread: `send`
+/// runs on the worker's single polling thread, and a wedged notifier (e.g. a
+/// stuck D-Bus session bus) must not be able to stall status polling,
+/// auto-close, or permission handling. Delivery is best-effort; exit status is
+/// irrelevant.
+///
+/// The child IS reaped — by a one-shot background thread — because a dropped
+/// `Child` that is never waited on becomes a zombie for the lifetime of this
+/// long-lived process (daemon/TUI), leaking a pid slot per notification.
 fn spawned(binary: &str, n: &Notification) -> bool {
-    Command::new(binary)
+    match Command::new(binary)
         .args(notifier_args(binary, n))
         .spawn()
-        .is_ok()
+    {
+        Ok(mut child) => {
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

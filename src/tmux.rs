@@ -658,19 +658,36 @@ pub fn send_text(session_name: &str, text: &str, submit: bool) -> Result<()> {
         .stdin(Stdio::piped())
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes())?;
+        if let Err(e) = stdin.write_all(text.as_bytes()) {
+            delete_buffer(&buf_name);
+            return Err(e.into());
+        }
     }
-    let status = child.wait()?;
-    if !status.success() {
-        bail!("tmux load-buffer failed");
+    match child.wait() {
+        Ok(status) if status.success() => {}
+        _ => {
+            delete_buffer(&buf_name);
+            bail!("tmux load-buffer failed");
+        }
     }
 
-    // -p: bracketed paste, -d: delete buffer after pasting.
-    let out = Command::new("tmux")
+    // -p: bracketed paste, -d: delete buffer after a *successful* paste.
+    let out = match Command::new("tmux")
         .args(["paste-buffer", "-d", "-p", "-b", buf_name.as_str(), "-t", &target])
-        .output()?;
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            delete_buffer(&buf_name);
+            return Err(e.into());
+        }
+    };
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
+        // A failed paste leaves the buffer behind (`-d` only deletes on
+        // success) — remove it so repeated failures can't leak one buffer per
+        // attempt for the tmux server's lifetime.
+        delete_buffer(&buf_name);
         bail!("tmux paste-buffer failed: {}", stderr.trim());
     }
 
@@ -684,6 +701,15 @@ pub fn send_text(session_name: &str, text: &str, submit: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Best-effort deletion of a paste buffer (a no-op if it doesn't exist). Used
+/// by [`send_text`] so a failure after `load-buffer` can't leak a buffer for
+/// the tmux server's lifetime.
+fn delete_buffer(name: &str) {
+    let _ = Command::new("tmux")
+        .args(["delete-buffer", "-b", name])
+        .output();
 }
 
 /// Capture the last `lines` lines (including scrollback) of a session's Claude
