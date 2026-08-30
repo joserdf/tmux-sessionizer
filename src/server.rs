@@ -793,6 +793,7 @@ async fn api_create_adhoc(
                 session_name: name,
                 use_worktree: false,
                 archived: false,
+                auto_closed: false,
                 agent: agent.id().to_string(),
             },
         );

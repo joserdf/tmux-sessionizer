@@ -20,30 +20,50 @@ pub enum CloseAction {
 }
 
 /// Policy settings that control when a session may be auto-closed.
+/// Auto-close is destructive, so it defaults to OFF. The other knobs are set to
+/// the documented policy so that turning `enabled` on is safe. These fns are
+/// the single source of truth for the per-field serde defaults, so a *partial*
+/// `[auto_close]` table (e.g. just `enabled = true`) deserializes instead of
+/// breaking the whole config file.
+fn def_enabled() -> bool {
+    false
+}
+fn def_idle_secs() -> Option<u64> {
+    Some(900)
+}
+fn def_close_on_finish() -> bool {
+    true
+}
+fn def_respect_dirty() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AutoCloseConfig {
     /// Master switch. When false, [`evaluate`] always returns
     /// [`CloseAction::None`].
+    #[serde(default = "def_enabled")]
     pub enabled: bool,
     /// Idle timeout in seconds before auto-close; `None` disables the idle
     /// trigger.
+    #[serde(default = "def_idle_secs")]
     pub idle_secs: Option<u64>,
     /// Close when the agent has finished.
+    #[serde(default = "def_close_on_finish")]
     pub close_on_finish: bool,
     /// When true, a session with uncommitted changes yields
     /// [`CloseAction::Confirm`] instead of a silent [`CloseAction::Close`].
+    #[serde(default = "def_respect_dirty")]
     pub respect_dirty: bool,
 }
 
 impl Default for AutoCloseConfig {
     fn default() -> Self {
-        // Auto-close is destructive, so it defaults to OFF. The other knobs are
-        // set to the documented policy so that turning `enabled` on is safe.
         Self {
-            enabled: false,
-            idle_secs: Some(900),
-            close_on_finish: true,
-            respect_dirty: true,
+            enabled: def_enabled(),
+            idle_secs: def_idle_secs(),
+            close_on_finish: def_close_on_finish(),
+            respect_dirty: def_respect_dirty(),
         }
     }
 }
@@ -180,5 +200,17 @@ mod tests {
             cfg,
             config(false, Some(900), true, true)
         );
+    }
+
+    #[test]
+    fn partial_table_deserializes_with_defaults() {
+        // A user who writes only `[auto_close]\nenabled = true` must not break
+        // the whole config file: the other fields fall back to their defaults.
+        let cfg: AutoCloseConfig =
+            serde_json::from_str(r#"{"enabled": true}"#).expect("partial config parses");
+        assert_eq!(cfg, config(true, Some(900), true, true));
+        // And an empty object is fully default (disabled).
+        let cfg: AutoCloseConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg, config(false, Some(900), true, true));
     }
 }

@@ -654,6 +654,11 @@ pub struct SessionRecord {
     /// Session belongs to an archived task. Skipped during startup recreation.
     #[serde(default, skip_serializing_if = "is_false")]
     pub archived: bool,
+    /// The daemon auto-closed this session (idle/finished). The TUI's startup
+    /// restore skips auto-closed sessions so they aren't resurrected; restarting
+    /// or unarchiving clears the flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_closed: bool,
     /// Agent harness running in the session. Records from before agents were
     /// tracked default to "claude".
     #[serde(default = "default_agent_id")]
@@ -704,6 +709,20 @@ pub fn remove_session_record(tmux_name: &str) {
     let mut sessions = load_sessions();
     if sessions.remove(tmux_name).is_some() {
         let _ = save_sessions(&sessions);
+    }
+}
+
+/// Set (or clear) the `auto_closed` flag on a session record and persist. No-op
+/// if the record doesn't exist. Used so the TUI's startup restore doesn't
+/// resurrect a session the daemon intentionally closed.
+pub fn set_session_auto_closed(tmux_name: &str, auto_closed: bool) {
+    let _g = IO_LOCK.lock().unwrap();
+    let mut sessions = load_sessions();
+    if let Some(rec) = sessions.get_mut(tmux_name) {
+        if rec.auto_closed != auto_closed {
+            rec.auto_closed = auto_closed;
+            let _ = save_sessions(&sessions);
+        }
     }
 }
 

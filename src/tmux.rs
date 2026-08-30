@@ -1502,6 +1502,20 @@ pub fn worktree_is_dirty(worktree_path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Like [`worktree_is_dirty`], but fail-safe: any error (spawn failure, git
+/// non-zero exit, not a repo, transient index lock) is treated as *dirty*.
+/// Used by auto-close, where the cost of a false "clean" is destroying a
+/// session's uncommitted work — so when in doubt, keep the session.
+pub fn worktree_dirty_failsafe(worktree_path: &str) -> bool {
+    match Command::new("git")
+        .args(["-C", worktree_path, "status", "--porcelain"])
+        .output()
+    {
+        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        _ => true,
+    }
+}
+
 /// Generate a default commit message: "<session_name>-<N>" where N increments.
 pub fn next_commit_message(worktree_path: &str, session_name: &str) -> String {
     let count = Command::new("git")

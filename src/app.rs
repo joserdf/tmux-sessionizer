@@ -547,10 +547,14 @@ impl App {
 
                 if tmux::is_adhoc_marker(&record.task_name) {
                     // Adhoc sessions are project-scoped. Recreate while the
-                    // project exists; otherwise the project is gone — prune.
+                    // project exists (unless auto-closed); otherwise the project
+                    // is gone — prune. An auto-closed record with a live project
+                    // is left for the user to restart from the TUI.
                     if !config.project_exists(&record.project_path) {
                         config::remove_session_record(tmux_name);
-                    } else if tmux::recreate_adhoc_session(tmux_name, record).is_err() {
+                    } else if !record.auto_closed
+                        && tmux::recreate_adhoc_session(tmux_name, record).is_err()
+                    {
                         config::remove_session_record(tmux_name);
                     }
                     continue;
@@ -561,7 +565,11 @@ impl App {
                 // is edited by hand.
                 match config.find_task_by_branch(&record.project_path, &record.task_branch) {
                     Some(_) => {
-                        if tmux::recreate_session(tmux_name, record).is_err() {
+                        // Recreate, unless the daemon auto-closed it (leave that
+                        // record for the user to restart from the TUI).
+                        if !record.auto_closed
+                            && tmux::recreate_session(tmux_name, record).is_err()
+                        {
                             // Could not recreate (e.g. worktree gone) — remove stale record
                             config::remove_session_record(tmux_name);
                         }
@@ -570,7 +578,9 @@ impl App {
                         // The task no longer exists in config. Reap the orphan
                         // (worktree + cached context + record) so it isn't
                         // resurrected on every startup. The git branch is kept,
-                        // preserving any committed work.
+                        // preserving any committed work. (Reaped even if
+                        // auto-closed: an auto-closed session whose task was
+                        // deleted is just a stale record.)
                         tmux::cleanup_orphan_session(record);
                         config::remove_session_record(tmux_name);
                     }
@@ -1427,7 +1437,13 @@ impl App {
             for (tmux_name, record) in &records {
                 if record.project_name == project_name && record.task_name == task_name {
                     match tmux::recreate_session(tmux_name, record) {
-                        Ok(_) => recreated += 1,
+                        Ok(_) => {
+                            // Unarchiving re-activates the task: clear any
+                            // auto-closed marker so the revived session is treated
+                            // as a normal live session.
+                            config::set_session_auto_closed(tmux_name, false);
+                            recreated += 1;
+                        }
                         Err(_) => {
                             failed += 1;
                             // Stale record (e.g. worktree removed externally) — drop it.
@@ -1980,6 +1996,9 @@ impl App {
         self.start_op(&format!("Restarting {name}..."), move || {
             // Kill the tmux session only — keep worktree, branch, record intact.
             let _ = crate::tmux::kill_session_only(&name);
+            // The user is explicitly reviving this session: clear the
+            // auto-closed marker so startup restore no longer skips it.
+            config::set_session_auto_closed(&name, false);
             match crate::tmux::recreate_session(&name, &record) {
                 Ok(_) => OpResult {
                     message: format!("Restarted '{name}' (conversation resumed)"),
@@ -2324,6 +2343,7 @@ impl App {
                             session_name: session_name.clone(),
                             use_worktree,
                             archived: false,
+                            auto_closed: false,
                             agent: agent.id().to_string(),
                         },
                     );
@@ -2414,6 +2434,7 @@ impl App {
                             session_name: session_name.clone(),
                             use_worktree: false,
                             archived: false,
+                            auto_closed: false,
                             agent: agent.id().to_string(),
                         },
                     );
@@ -2545,6 +2566,7 @@ impl App {
                             session_name: session_name.clone(),
                             use_worktree,
                             archived: false,
+                            auto_closed: false,
                             agent: agent.id().to_string(),
                         },
                     );

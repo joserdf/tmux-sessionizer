@@ -51,6 +51,7 @@ pub fn create_task_session(
             session_name,
             use_worktree,
             archived: false,
+            auto_closed: false,
             agent: agent.id().to_string(),
         },
     );
