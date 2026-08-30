@@ -1,10 +1,10 @@
-//! Best-effort OS notifications and terminal bell.
+//! Best-effort OS notifications.
 //!
-//! The decision logic ([`pick_notifier`], [`notifier_args`]) is pure so it
-//! can be unit-tested without touching the system. [`send`] and
-//! [`tmux_bell`] are the thin side-effecting wrappers: both are
-//! best-effort and never panic, so callers can invoke them unconditionally
-//! without error handling.
+//! [`notifier_args`] is pure so it can be unit-tested without touching the
+//! system. [`send`] is the thin side-effecting wrapper: it's best-effort and
+//! never blocks the caller (notifier processes are spawned and detached, so a
+//! wedged notifier can't stall the worker), so callers can invoke it
+//! unconditionally without error handling.
 
 use std::process::Command;
 
@@ -17,20 +17,6 @@ pub struct Notification {
     pub title: String,
     pub body: String,
     pub urgent: bool,
-}
-
-/// Pick the notifier binary to use from the commands present on `PATH`.
-///
-/// `available` holds command names the caller has already checked exist
-/// (e.g. via `which`). Precedence is `terminal-notifier` (macOS) over
-/// `notify-send` (libnotify, Linux); `None` when neither is available.
-pub fn pick_notifier(available: &[&str]) -> Option<&'static str> {
-    for candidate in NOTIFIER_CANDIDATES {
-        if available.contains(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 /// Build the argument vector for `binary` — everything after the program
@@ -73,31 +59,25 @@ pub fn notifier_args(binary: &str, n: &Notification) -> Vec<String> {
 /// panics.
 pub fn send(n: &Notification) {
     for binary in NOTIFIER_CANDIDATES {
-        if ran(binary, n) {
+        if spawned(binary, n) {
             return;
         }
     }
 }
 
-/// Spawn `binary` with `n`'s args; `true` if the process launched and ran
-/// (exit status irrelevant), `false` on spawn error.
-fn ran(binary: &str, n: &Notification) -> bool {
+/// Launch `binary` with `n`'s args and immediately detach; `true` if the
+/// process spawned, `false` on spawn error.
+///
+/// We deliberately do NOT wait for the notifier to finish: `send` runs on the
+/// worker's single polling thread, and a wedged notifier (e.g. a stuck D-Bus
+/// session bus) must not be able to stall status polling, auto-close, or
+/// permission handling. Delivery is best-effort; exit status is irrelevant.
+fn spawned(binary: &str, n: &Notification) -> bool {
     Command::new(binary)
         .args(notifier_args(binary, n))
-        .output()
+        .spawn()
         .is_ok()
 }
-
-/// Ring the user's terminal bell.
-///
-/// Intentionally a no-op. This process is often a headless daemon with no
-/// terminal of its own, so there is no bell to ring; writing `\x07` when a
-/// terminal *is* attached would risk interleaving with the TUI's output.
-/// Under tmux the daemon's stdout is not a user pane, and tmux typically
-/// swallows or redirects pane bells (`bell-action`), so no command run from
-/// here (e.g. `tmux display-message`) could reliably reach the user's
-/// terminal. Callers may invoke this unconditionally; it never panics.
-pub fn tmux_bell() {}
 
 #[cfg(test)]
 mod tests {
@@ -109,25 +89,6 @@ mod tests {
             body: "demo finished on branch feat".to_string(),
             urgent,
         }
-    }
-
-    #[test]
-    fn pick_notifier_falls_back_to_notify_send() {
-        assert_eq!(pick_notifier(&["notify-send"]), Some("notify-send"));
-    }
-
-    #[test]
-    fn pick_notifier_prefers_terminal_notifier() {
-        assert_eq!(
-            pick_notifier(&["terminal-notifier", "notify-send"]),
-            Some("terminal-notifier")
-        );
-    }
-
-    #[test]
-    fn pick_notifier_is_none_when_nothing_available() {
-        assert_eq!(pick_notifier(&["x"]), None);
-        assert_eq!(pick_notifier(&[]), None);
     }
 
     #[test]
