@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::Router;
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -114,7 +114,14 @@ pub fn run(bind: &str) -> Result<()> {
             }
         });
 
-        axum::serve(listener, app).await?;
+        // `into_make_service_with_connect_info` makes the TCP peer address
+        // available to handlers as `ConnectInfo`; `api_hook` uses it to reject
+        // non-loopback sources (hooks are only ever posted locally).
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
         Ok(())
     })
 }
@@ -547,8 +554,16 @@ async fn api_kill(Path(name): Path<String>) -> Result<StatusCode, ApiError> {
 /// The event is normalized and kept (bounded) for `GET /api/hook-events`.
 async fn api_hook(
     State(state): State<Arc<ServerState>>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     axum::Json(body): axum::Json<Value>,
 ) -> Result<StatusCode, ApiError> {
+    // Hook events are only ever posted by local agent hooks (post-event.sh curls
+    // 127.0.0.1). Reject non-loopback sources so an exposed daemon (e.g. bound to
+    // a tailnet IP) can't be fed forged hook events that manipulate session
+    // status or trigger auto-close.
+    if !peer.ip().is_loopback() {
+        return Ok(StatusCode::FORBIDDEN);
+    }
     let agent = body.get("agent").and_then(Value::as_str).unwrap_or("");
     let raw = body.to_string();
     let event = match agent {
@@ -565,13 +580,25 @@ async fn api_hook(
         .and_then(Value::as_str)
         .map(String::from)
         .unwrap_or_default();
+    // The cwd is the correlation key the worker uses to map the event back to a
+    // tmux session (the agent's session_id is not the tmux name).
+    let cwd = body
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .unwrap_or_default();
 
     {
         let mut evs = state.hook_events.lock().unwrap();
-        evs.push_back((session_id, event, std::time::Instant::now()));
+        evs.push_back((session_id.clone(), event.clone(), std::time::Instant::now()));
         while evs.len() > 200 {
             evs.pop_front();
         }
+    }
+    // Feed the authoritative inbox so the worker refines status with zero
+    // pane-scrape latency (permission prompt, turn-completed, session-ended).
+    if !cwd.is_empty() {
+        state.worker.hook_inbox.lock().unwrap().push_back((cwd, event));
     }
     Ok(StatusCode::OK)
 }

@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::autoclose::{self, AutoCloseConfig, CloseAction};
+use crate::hooks::AgentEvent;
 use crate::resources::SessionResources;
 use crate::tmux::{self, DiffStats, SessionStatus, TmuxSession};
 
@@ -60,6 +62,19 @@ pub struct Worker {
     /// it. Using a mutex instead of an unbounded channel prevents updates from
     /// piling up while the main thread is blocked (e.g. during `tmux attach`).
     pub latest: Arc<Mutex<Option<WorkerUpdate>>>,
+    /// Authoritative agent-hook events, keyed by the hook's `cwd`, pushed by
+    /// `POST /api/hook` and drained by the worker loop to refine status with
+    /// zero pane-scrape latency. (cwd, not the agent's session_id, is the
+    /// correlation key: it maps back to a tmux session via the records.)
+    pub hook_inbox: Arc<Mutex<VecDeque<(String, AgentEvent)>>>,
+    /// Live connection to the daemon (remote mode). True while the SSE stream
+    /// is actively delivering; false when it has dropped. In local mode this is
+    /// always true (the worker IS the source). The UI shows a "daemon
+    /// disconnected" banner when `remote && !connected`.
+    pub connected: Arc<AtomicBool>,
+    /// True when this worker is a client of a remote daemon (vs. a local worker
+    /// probing tmux directly).
+    pub remote: bool,
 }
 
 impl Worker {
@@ -69,12 +84,26 @@ impl Worker {
             project_paths: Vec::new(),
         }));
         let latest = Arc::new(Mutex::new(None));
+        let hook_inbox = Arc::new(Mutex::new(VecDeque::new()));
+        // Local mode: the worker is its own source, so it's always "connected"
+        // and never remote (no daemon banner).
+        let connected = Arc::new(AtomicBool::new(true));
 
         let hints_clone = hints.clone();
         let latest_clone = latest.clone();
-        thread::spawn(move || worker_loop(hints_clone, latest_clone));
+        let inbox_clone = hook_inbox.clone();
+        let connected_clone = connected.clone();
+        thread::spawn(move || {
+            worker_loop(hints_clone, latest_clone, inbox_clone, false, connected_clone)
+        });
 
-        Worker { hints, latest }
+        Worker {
+            hints,
+            latest,
+            hook_inbox,
+            connected,
+            remote: false,
+        }
     }
 
     /// The daemon's raw-`WorkerUpdate` SSE URL, from `SESSIONIZER_PORT`
@@ -105,32 +134,65 @@ impl Worker {
     /// Run this worker as a CLIENT of the daemon's SSE stream instead of
     /// spawning a local worker. A background thread (its own tokio runtime)
     /// reads `/events/worker` and writes each `WorkerUpdate` into `latest`,
-    /// reconnecting with backoff if the connection drops. `hints` is unused in
-    /// remote mode but kept for a uniform `Worker` shape.
+    /// reconnecting with backoff if the connection drops. A second background
+    /// thread runs the local probe loop in *fallback* mode: it stays idle while
+    /// the daemon is reachable and takes over publishing (and notifications) the
+    /// moment the stream drops, so the dashboard keeps updating when the daemon
+    /// dies. `hints` is unused in remote mode but kept for a uniform `Worker`
+    /// shape.
     pub fn connect_remote(url: &str) -> Self {
         let hints = Arc::new(Mutex::new(WorkerHints {
             tasks: Vec::new(),
             project_paths: Vec::new(),
         }));
         let latest = Arc::new(Mutex::new(None));
+        // Unused in remote mode (the daemon's worker owns the hook inbox); kept
+        // for a uniform Worker shape.
+        let hook_inbox = Arc::new(Mutex::new(VecDeque::new()));
+        // Starts false; the SSE client flips it true once the stream is
+        // delivering and back to false on any drop.
+        let connected = Arc::new(AtomicBool::new(false));
+
         let url = url.to_string();
-        let latest_clone = latest.clone();
+        let latest_sse = latest.clone();
+        let connected_sse = connected.clone();
         thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
             if let Ok(rt) = rt {
-                rt.block_on(sse_client(url, latest_clone));
+                rt.block_on(sse_client(url, latest_sse, connected_sse));
             }
         });
-        Worker { hints, latest }
+
+        // Local fallback prober: idle while the daemon is up, takes over when
+        // the stream drops.
+        let latest_fb = latest.clone();
+        let connected_fb = connected.clone();
+        let hints_fb = hints.clone();
+        let inbox_fb = hook_inbox.clone();
+        thread::spawn(move || {
+            worker_loop(hints_fb, latest_fb, inbox_fb, true, connected_fb)
+        });
+
+        Worker {
+            hints,
+            latest,
+            hook_inbox,
+            connected,
+            remote: true,
+        }
     }
 }
 
 /// Read the daemon's raw-`WorkerUpdate` SSE stream into `latest`, reconnecting
 /// with backoff on any drop so a daemon restart recovers transparently. Runs
 /// forever (the TUI's process lifetime bounds it).
-async fn sse_client(url: String, latest: Arc<Mutex<Option<WorkerUpdate>>>) {
+async fn sse_client(
+    url: String,
+    latest: Arc<Mutex<Option<WorkerUpdate>>>,
+    connected: Arc<AtomicBool>,
+) {
     use futures_util::StreamExt;
     let client = match reqwest::Client::builder().build() {
         Ok(c) => c,
@@ -141,6 +203,8 @@ async fn sse_client(url: String, latest: Arc<Mutex<Option<WorkerUpdate>>>) {
         let ok = match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 backoff = Duration::from_millis(500);
+                // Stream is live: the daemon is the authoritative source again.
+                connected.store(true, Ordering::Relaxed);
                 let mut stream = resp.bytes_stream();
                 let mut buf: Vec<u8> = Vec::new();
                 while let Some(chunk) = stream.next().await {
@@ -157,9 +221,16 @@ async fn sse_client(url: String, latest: Arc<Mutex<Option<WorkerUpdate>>>) {
                         }
                     }
                 }
+                // Stream dropped (daemon closing / restarting / read error): the
+                // local fallback prober takes over from here.
+                connected.store(false, Ordering::Relaxed);
                 true
             }
-            _ => false,
+            _ => {
+                // Couldn't (re)connect the daemon.
+                connected.store(false, Ordering::Relaxed);
+                false
+            }
         };
         if !ok {
             // Couldn't (re)connect: back off and retry.
@@ -196,7 +267,18 @@ fn parse_sse_frame(frame: &str) -> Option<WorkerUpdate> {
     serde_json::from_str::<WorkerUpdate>(&data).ok()
 }
 
-fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUpdate>>>) {
+/// `fallback` marks a remote-mode worker running as the local fallback prober:
+/// it stays idle (no tmux probing) while `connected` is true and takes over
+/// publishing once the daemon stream drops. Fallback runs the dashboard probes
+/// and notifications but NOT auto-close (a degraded client should not kill
+/// sessions; the daemon was the auto-close authority).
+fn worker_loop(
+    hints: Arc<Mutex<WorkerHints>>,
+    latest: Arc<Mutex<Option<WorkerUpdate>>>,
+    hook_inbox: Arc<Mutex<VecDeque<(String, AgentEvent)>>>,
+    fallback: bool,
+    connected: Arc<AtomicBool>,
+) {
     let mut content_hashes: HashMap<String, u64> = HashMap::new();
     let mut stable_ticks: HashMap<String, u32> = HashMap::new();
     let mut diff_stats: HashMap<String, DiffStats> = HashMap::new();
@@ -222,8 +304,23 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
     let mut idle_since: HashMap<String, Instant> = HashMap::new();
     let mut ac_acted: HashMap<String, CloseAction> = HashMap::new();
     let mut prev_statuses: HashMap<String, SessionStatus> = HashMap::new();
+    // How many consecutive ticks a session has looked finished. `Finished` is
+    // only reported (and thus becomes auto-close eligible) after it persists, so
+    // a single transient probe failure can't kill a clean session.
+    let mut finished_ticks: HashMap<String, u32> = HashMap::new();
+    // Cache of (last_check, dirty) per close candidate, so a blocked (dirty)
+    // session isn't re-scanned by `git status` on every auto-close pass.
+    let mut dirty_cache: HashMap<String, (Instant, bool)> = HashMap::new();
 
     loop {
+        // Fallback mode: while the daemon is reachable it owns the data, so the
+        // local prober stays idle (no duplicate tmux probing). The instant the
+        // stream drops, it wakes and takes over.
+        if fallback && connected.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+
         let sessions = tmux::list_sessions().unwrap_or_default();
 
         // Refresh the resource sample before publishing, so both publishes
@@ -241,6 +338,10 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
         // Compute statuses
         let mut statuses = HashMap::new();
         const STABLE_THRESHOLD: u32 = 3;
+        // A session must look finished this many consecutive ticks before it is
+        // reported Finished (and thus becomes auto-close eligible), so a single
+        // transient probe failure can't kill a clean session.
+        const FINISHED_THRESHOLD: u32 = 3;
 
         for session in &sessions {
             let probe = tmux::probe_session(&session.name);
@@ -249,14 +350,15 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
                 None => {
                     content_hashes.remove(&session.name);
                     stable_ticks.remove(&session.name);
-                    SessionStatus::Finished
+                    finished_status(&mut finished_ticks, &session.name, FINISHED_THRESHOLD)
                 }
                 Some(probe) if !probe.agent_alive => {
                     content_hashes.remove(&session.name);
                     stable_ticks.remove(&session.name);
-                    SessionStatus::Finished
+                    finished_status(&mut finished_ticks, &session.name, FINISHED_THRESHOLD)
                 }
                 Some(probe) => {
+                    finished_ticks.remove(&session.name);
                     let prev_hash = content_hashes.get(&session.name).copied();
                     let content_changed = prev_hash.is_some_and(|h| h != probe.content_hash);
 
@@ -281,6 +383,40 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
             };
 
             statuses.insert(session.name.clone(), status);
+        }
+
+        // Apply one-shot authoritative hook overrides. A hook event (e.g. a
+        // permission prompt) removes the pane-scrape detection latency so the
+        // state shows on the very next tick. The hook's `cwd` is correlated back
+        // to a tmux session via the records. Consumed here; the pane scrape is
+        // authoritative again on the following tick (it keeps or corrects the
+        // state).
+        {
+            let pending: Vec<(String, AgentEvent)> = {
+                let mut inbox = hook_inbox.lock().unwrap();
+                inbox.drain(..).collect()
+            };
+            if !pending.is_empty() {
+                let records = crate::config::load_sessions();
+                let mut cwd_to_session: HashMap<String, String> = HashMap::new();
+                for (name, rec) in &records {
+                    let cwd = if rec.use_worktree {
+                        tmux::worktree_dir(&rec.project_name, &rec.task_name, &rec.session_name)
+                            .to_string_lossy()
+                            .into_owned()
+                    } else {
+                        rec.project_path.clone()
+                    };
+                    cwd_to_session.insert(cwd, name.clone());
+                }
+                for (cwd, ev) in pending {
+                    let Some(status) = ev.status_hint() else { continue };
+                    let Some(name) = cwd_to_session.get(&cwd).cloned() else { continue };
+                    if sessions.iter().any(|s| s.name == name) {
+                        statuses.insert(name, status);
+                    }
+                }
+            }
         }
 
         // Surface a permission prompt to the OS (once per transition), so the
@@ -385,15 +521,27 @@ fn worker_loop(hints: Arc<Mutex<WorkerHints>>, latest: Arc<Mutex<Option<WorkerUp
 
         // Evaluate the auto-close policy on a reduced cadence (~every 2s),
         // before publishing so a killed session drops out on the next tick.
-        if tick % 4 == 0 {
+        // Skipped in fallback mode: a degraded client must not kill sessions
+        // (the daemon was the auto-close authority).
+        if !fallback && tick % 4 == 0 {
             auto_close_step(
                 &auto_close,
                 &statuses,
                 &session_agents,
                 &mut idle_since,
                 &mut ac_acted,
+                &mut dirty_cache,
             );
         }
+
+        // Prune per-session bookkeeping for sessions that no longer exist so the
+        // maps stay bounded as sessions come and go.
+        let alive: HashSet<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+        prev_statuses.retain(|n, _| alive.contains(n.as_str()));
+        ac_acted.retain(|n, _| alive.contains(n.as_str()));
+        idle_since.retain(|n, _| alive.contains(n.as_str()));
+        finished_ticks.retain(|n, _| alive.contains(n.as_str()));
+        dirty_cache.retain(|n, _| alive.contains(n.as_str()));
 
         generation += 1;
         let update = WorkerUpdate {
@@ -430,33 +578,25 @@ fn get_current_branch(project_path: &str) -> Option<String> {
     }
 }
 
-/// The pane's current working directory (the session's worktree).
-fn pane_cwd(session_name: &str) -> Option<String> {
-    let target = format!("{session_name}:0");
-    let output = std::process::Command::new("tmux")
-        .args(["display-message", "-t", &target, "-p", "#{pane_current_path}"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
-    }
-}
 
-/// Whether the git repo at `cwd` has uncommitted changes (porcelain non-empty).
-fn worktree_dirty(cwd: &str) -> bool {
-    let Ok(output) = std::process::Command::new("git")
-        .args(["-C", cwd, "status", "--porcelain"])
-        .output()
-    else {
-        return false;
-    };
-    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+
+/// Advance a session's finished-stability counter and report its status. A
+/// session is only reported `Finished` once it has looked finished (dead pane /
+/// missing agent window) for `threshold` consecutive ticks; until then it
+/// reports `Running` so a single transient probe failure can't make it an
+/// instant auto-close target.
+fn finished_status(
+    finished_ticks: &mut HashMap<String, u32>,
+    name: &str,
+    threshold: u32,
+) -> SessionStatus {
+    let ticks = finished_ticks.entry(name.to_string()).or_insert(0);
+    *ticks = ticks.saturating_add(1);
+    if *ticks >= threshold {
+        SessionStatus::Finished
+    } else {
+        SessionStatus::Running
+    }
 }
 
 /// Apply the auto-close policy to agent sessions (never plain terminals or run
@@ -469,10 +609,20 @@ fn auto_close_step(
     session_agents: &HashMap<String, String>,
     idle_since: &mut HashMap<String, Instant>,
     acted: &mut HashMap<String, CloseAction>,
+    dirty_cache: &mut HashMap<String, (Instant, bool)>,
 ) {
     if !cfg.enabled {
         return;
     }
+    // Records are the authoritative set of showrunner sessions and give each
+    // session's work dir. A session with no record (e.g. a hand-made `cm__*`
+    // session) is not ours to auto-close.
+    let records = crate::config::load_sessions();
+    // Re-check `git status` at most every DIRTY_RECHECK so a blocked (dirty)
+    // candidate doesn't pay a full scan of its (possibly large) repo every 2 s,
+    // while still catching the user committing within a bounded window.
+    const DIRTY_RECHECK: Duration = Duration::from_secs(10);
+
     for (name, _agent) in session_agents.iter() {
         let Some(status) = statuses.get(name) else {
             continue;
@@ -494,11 +644,34 @@ fn auto_close_step(
 
         if !finished && !idle {
             acted.remove(name);
+            dirty_cache.remove(name);
             continue;
         }
 
-        // Only pay for a git status check on close candidates.
-        let dirty = pane_cwd(name).is_some_and(|cwd| worktree_dirty(&cwd));
+        let Some(record) = records.get(name) else {
+            continue;
+        };
+
+        // Fail-safe dirty check on the authoritative work dir (worktree or
+        // project path), not the user-mutable pane cwd. Any read error is
+        // treated as dirty, so a session we can't verify is never closed.
+        let dirty = match dirty_cache.get(name) {
+            Some((when, d)) if when.elapsed() < DIRTY_RECHECK => *d,
+            _ => {
+                let work_dir = if record.use_worktree {
+                    tmux::worktree_dir(&record.project_name, &record.task_name, &record.session_name)
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    record.project_path.clone()
+                };
+                let d = tmux::worktree_dirty_failsafe(&work_dir);
+                dirty_cache.insert(name.clone(), (Instant::now(), d));
+                d
+            }
+        };
+        let reason = if finished { "finished" } else { "idle" };
+
         let action = autoclose::evaluate(
             cfg,
             &autoclose::SessionCloseState {
@@ -511,11 +684,15 @@ fn auto_close_step(
         match action {
             CloseAction::Close => {
                 let _ = tmux::kill_session_only(name);
+                // Mark the record so the TUI's startup restore doesn't bring an
+                // auto-closed session back (restart / unarchive clears it).
+                crate::config::set_session_auto_closed(name, true);
                 idle_since.remove(name);
                 acted.remove(name);
+                dirty_cache.remove(name);
                 crate::notify::send(&crate::notify::Notification {
                     title: "showrunner: auto-closed".to_string(),
-                    body: format!("Session '{name}' was auto-closed (agent finished, clean)."),
+                    body: format!("Session '{name}' was auto-closed ({reason}, clean)."),
                     urgent: false,
                 });
             }

@@ -192,6 +192,22 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(current().yellow),
         ));
     }
+    // Remote mode + dropped daemon stream: the dashboard is now fed by the
+    // local fallback prober. Say so, so frozen-vs-live data is never ambiguous.
+    if app.worker.remote
+        && !app
+            .worker
+            .connected
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        spans.push(Span::styled(sep_str, sep));
+        spans.push(Span::styled(
+            if compact { "⚠ daemon" } else { "⚠ daemon down · local mode" },
+            Style::default()
+                .fg(current().red)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
