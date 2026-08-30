@@ -402,15 +402,40 @@ Fixed across commits `44b9571` (feat) + `a78f29b` (fix): **all 4 High (H1–H4),
 M1, M2, M3, L1–L10, N3, N4, N5.**
 
 Not addressed (intentional):
-- **M4** — lives in `scripts/lib/ui.sh` (per-session alert badge reading a 6th
-  `opencode-hook.state` field). That file is pre-existing legacy bash not part
-  of the Rust integration and not referenced by the new `sessionizer.tmux`
-  bootstrap (which uses the daemon-written `status.cache` instead). Needs a
-  separate decision: delete the superseded legacy bash TUI, or reconcile the
-  `opencode-hook.state` schema.
+- **M4** — **resolved by deletion.** Commit `461732b` ("…+ drop legacy bash")
+  removed the superseded legacy bash TUI (`scripts/main.sh`, `scripts/lib/ui.sh`,
+  `helpers/alerts.sh`), so the contradictory `opencode-hook.state` 6-field reader
+  no longer exists. Only `scripts/daemon.sh` + `helpers/alert_status.sh` remain.
 - **N1 / N2** — cosmetic (`mem_human` unit-constant naming; `CPU {:.0}%`
-  half-to-even rounding). Left as-is.
+  half-to-even rounding). Still intentionally open.
 
-Verification: `cargo test` 116 pass; SSE idle emits ~1 state/6s (was ~12);
-daemon `status.cache` written; recycled-PID rejected; runtime resource test
-exercises a real CPU burner.
+Verification (at the time): `cargo test` 116 pass; SSE idle emits ~1 state/6s
+(was ~12); daemon `status.cache` written; recycled-PID rejected; runtime resource
+test exercises a real CPU burner.
+
+---
+
+### Second, broader review (G1–G6) — 2026-08
+
+A follow-up whole-codebase review grouped its findings into six areas. All were
+fixed in `91e87f4..f018422` (six commits), followed by a hardening pass
+(`94cf3ca` leaks, `0d52a31` hung-daemon detection, `2edad7b` safety tests):
+- **G1 hooks** — authoritative agent-hook model (`AgentEvent::status_hint`,
+  `PermissionRequest` wired), `post-event.sh` as a thin forwarder, plugin
+  `hooks.json` installed into the worktree; `set_session_env` propagates the
+  daemon port.
+- **G2 consumption** — `POST /api/hook` → worker `hook_inbox` keyed by cwd →
+  cwd→session correlation → one-shot status override (zero pane-scrape latency).
+- **G3 auto-close** — fail-safe dirty check on the record's work dir (error ⇒
+  dirty), 3-tick finished-stability guard, `auto_closed` record marker (restore
+  skips it, restart/unarchive clears it), bounded per-session bookkeeping.
+- **G4 notifications** — spawn-and-detach with a reaper thread, so a wedged
+  notifier can't stall the single worker polling thread.
+- **G5 TUI** — approve gated on `WaitingForPermission`, unique paste buffer per
+  send, content-sized resource panel, worker-hint dedup.
+- **G6 scope** — daemon-death local fallback + "daemon down" banner (with
+  hung-daemon detection), `/api/hook` loopback-only, docs.
+
+Verification: `cargo test` 176 pass; hook → status e2e confirmed over a live SSE
+stream; the failsafe-dirty property and the hook loopback policy are now
+unit-tested.
