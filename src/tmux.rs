@@ -781,15 +781,26 @@ pub fn send_key(session_name: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Build the command to bring the target session to the foreground. Inside
+/// tmux (`$TMUX` set — e.g. the TUI running in a pane or the `Alt+s` popup),
+/// `attach-session` refuses to nest ("sessions should be nested with care");
+/// `switch-client` moves the current client to the session instead. In a bare
+/// terminal, `attach-session` is the right call.
+fn attach_tmux(name: &str) -> std::io::Result<std::process::ExitStatus> {
+    if std::env::var_os("TMUX").is_some() {
+        Command::new("tmux").args(["switch-client", "-t", name]).status()
+    } else {
+        Command::new("tmux").args(["attach-session", "-t", name]).status()
+    }
+}
+
 pub fn attach_session(name: &str) -> Result<()> {
     // Select window 0 (claude) before attaching
     let _ = Command::new("tmux")
         .args(["select-window", "-t", &format!("{name}:0")])
         .output();
 
-    let status = Command::new("tmux")
-        .args(["attach-session", "-t", name])
-        .status()?;
+    let status = attach_tmux(name)?;
 
     if !status.success() {
         bail!("Failed to attach to tmux session");
@@ -808,9 +819,7 @@ pub fn attach_session_window(session_name: &str, window_idx: usize) -> Result<()
         ])
         .output();
 
-    let status = Command::new("tmux")
-        .args(["attach-session", "-t", session_name])
-        .status()?;
+    let status = attach_tmux(session_name)?;
 
     if !status.success() {
         bail!("Failed to attach to tmux session");
