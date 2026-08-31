@@ -641,22 +641,32 @@ fn meta_block<'a>(
 }
 
 /// Compact per-session resource readout: `CPU 12% · 1.2G`.
+///
+/// `round()` (half away from zero) rather than `{:.0}` (half-to-even), so
+/// `12.5` displays as `13` — the intuitive reading of a percentage.
 fn resource_label(r: &crate::resources::SessionResources) -> String {
-    format!("CPU {:.0}% · {}", r.cpu_percent, mem_human(r.mem_kb))
+    format!("CPU {}% · {}", r.cpu_percent.round() as u32, mem_human(r.mem_kb))
 }
 
 /// KiB as a short human string: `512K`, `1.2M`, `3.4G`.
 fn mem_human(kb: u64) -> String {
-    const MB: u64 = 1024 * 1024;
-    const GB: u64 = 1024 * 1024 * 1024;
+    // KiB thresholds: 1 GiB = 1024^2 KiB, 1 TiB = 1024^3 KiB.
+    const KIB_PER_GIB: u64 = 1024 * 1024;
+    const KIB_PER_TIB: u64 = 1024 * 1024 * 1024;
     if kb < 1024 {
         format!("{kb}K")
-    } else if kb < MB {
-        format!("{:.1}M", kb as f64 / 1024.0)
-    } else if kb < GB {
-        format!("{:.1}G", kb as f64 / MB as f64)
+    } else if kb < KIB_PER_GIB {
+        let mb = kb as f64 / 1024.0;
+        // Promote to G when the value would otherwise display as "1024.0M".
+        if mb >= 1023.95 {
+            format!("{:.1}G", mb / 1024.0)
+        } else {
+            format!("{:.1}M", mb)
+        }
+    } else if kb < KIB_PER_TIB {
+        format!("{:.1}G", kb as f64 / KIB_PER_GIB as f64)
     } else {
-        format!("{:.1}T", kb as f64 / GB as f64)
+        format!("{:.1}T", kb as f64 / KIB_PER_TIB as f64)
     }
 }
 
@@ -1877,6 +1887,8 @@ mod tests {
         assert_eq!(mem_human(512), "512K");
         assert_eq!(mem_human(1024), "1.0M");
         assert_eq!(mem_human(1256), "1.2M");
+        // Just under 1 GiB must promote to G, not display as "1024.0M".
+        assert_eq!(mem_human(1048575), "1.0G");
         assert_eq!(mem_human(1300 * 1024), "1.3G");
         assert_eq!(mem_human(1600 * 1024 * 1024), "1.6T");
     }
