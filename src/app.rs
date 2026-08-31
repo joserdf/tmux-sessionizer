@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -291,6 +291,35 @@ pub fn extract_difit_comments(stdout: &str) -> Option<String> {
 /// candidate sessions its comments forward to (`(tmux name, display name)`).
 type HunkReview = (String, Vec<String>, Vec<(String, String)>);
 
+/// Detail-pane cache for the currently-selected session: the trimmed latest
+/// output (the "final texts") and the worktree diff, fetched on a short timer so
+/// the UI thread stays responsive. Kept per-session so switching selection
+/// doesn't show a stale other session's content.
+pub struct SessionDetail {
+    pub session: String,
+    /// The agent's recent output (plain capture, trailing chrome/blank trimmed).
+    pub output: Option<String>,
+    /// The session worktree's git diff vs its task branch (full text).
+    pub diff: Option<String>,
+    pub fetched_at: Instant,
+}
+
+/// Light cleanup of a plain pane capture for the detail pane: drop leading and
+/// trailing blank lines. This is "the agent's recent output", not a full
+/// transcript reconstruction.
+fn trim_detail_output(raw: String) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut start = 0;
+    let mut end = lines.len();
+    while start < end && lines[start].trim().is_empty() {
+        start += 1;
+    }
+    while end > start && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+    lines[start..end].join("\n")
+}
+
 pub struct App {
     pub config: Config,
     pub keybindings: KeyBindings,
@@ -391,6 +420,8 @@ pub struct App {
     /// into view. Persisted across frames so scrolling feels stable in both
     /// directions; updated during rendering to keep the selection visible.
     pub list_offset: std::cell::Cell<u16>,
+    /// Detail-pane cache for the selected session (latest output + diff).
+    pub detail: Option<SessionDetail>,
 }
 
 pub struct OpResult {
@@ -657,6 +688,7 @@ impl App {
             selected_row: std::cell::Cell::new(0),
             hostname: detect_hostname(),
             list_offset: std::cell::Cell::new(0),
+            detail: None,
         };
         // Start with all tasks collapsed, and projects with no tasks collapsed
         for project in &app.config.projects {
@@ -971,6 +1003,48 @@ impl App {
 
     pub fn selected_item(&self) -> Option<&ListItem> {
         self.items.get(self.selected)
+    }
+
+    /// The tmux name of the selected session, if the selection is a session
+    /// (task or adhoc). `None` when a project/task/group is selected.
+    pub fn selected_session_name(&self) -> Option<String> {
+        match self.selected_item()? {
+            ListItem::Session { session, .. } | ListItem::AdhocSession { session, .. } => {
+                Some(session.name.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// How long the detail pane caches before re-fetching the (single) selected
+    /// session's output + diff.
+    const DETAIL_REFRESH: Duration = Duration::from_secs(2);
+
+    /// Re-fetch the detail pane (trimmed output + diff) when the selection
+    /// changed or the cache is stale. Only the one selected session is fetched,
+    /// on a 2 s cadence, so the two subprocess calls (a tmux capture and a git
+    /// diff) are cheap enough to run on the UI thread. Called from the event
+    /// loop before each draw.
+    pub fn maybe_refresh_detail(&mut self) {
+        let Some(session) = self.selected_session_name() else {
+            self.detail = None;
+            return;
+        };
+        let stale = match &self.detail {
+            None => true,
+            Some(d) => d.session != session || d.fetched_at.elapsed() > Self::DETAIL_REFRESH,
+        };
+        if !stale {
+            return;
+        }
+        let output = tmux::capture_output_plain(&session, 150).map(trim_detail_output);
+        let diff = tmux::get_session_diff_text(&session);
+        self.detail = Some(SessionDetail {
+            session,
+            output,
+            diff,
+            fetched_at: Instant::now(),
+        });
     }
 
     /// Get the project context for the currently selected item.
@@ -1903,15 +1977,6 @@ impl App {
         }
         // Window 0 is the agent; the first terminal is window 1.
         self.should_attach_window = Some((name, 1));
-    }
-
-    /// The tmux name of the selected session, if the selection is a session.
-    fn selected_session_name(&self) -> Option<String> {
-        match self.selected_item() {
-            Some(ListItem::Session { session, .. })
-            | Some(ListItem::AdhocSession { session, .. }) => Some(session.name.clone()),
-            _ => None,
-        }
     }
 
     /// Open the "Send message" prompt targeting the selected session.

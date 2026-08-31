@@ -15,6 +15,10 @@ use crate::tmux::{self, SessionStatus};
 const PAD_LEFT: u16 = 1;
 const PAD_TOP: u16 = 1;
 
+/// Master-detail split: the project/task/session tree is the sidebar (master),
+/// and the selected session's output + diff fill the detail pane on the right.
+const SIDEBAR_PCT: u16 = 40;
+
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Inline "Run" indicator for a list item, when a run session is live: an
@@ -83,13 +87,19 @@ pub fn draw(f: &mut Frame, app: &App) {
     let list_area = chunks[2];
 
     draw_dashboard(f, app, chunks[1]);
-    // The preview/diff column was removed; the cards span the full width.
-    // The panel renderers (draw_preview_panel / draw_task_diff_panel) and their
-    // backing state are retained for upcoming dedicated fullscreen views.
+    // Master-detail view: the project/task/session tree is the sidebar (master);
+    // the selected session's output + diff render in the detail pane. With no
+    // projects there is nothing to detail, so the empty state spans full width.
     if app.config.projects.is_empty() {
         draw_empty_state(f, app, list_area);
     } else {
-        draw_list(f, app, list_area);
+        let md = Layout::horizontal([
+            Constraint::Percentage(SIDEBAR_PCT),
+            Constraint::Percentage(100 - SIDEBAR_PCT),
+        ])
+        .split(list_area);
+        draw_list(f, app, md[0]);
+        draw_detail(f, app, md[1]);
     }
 
     draw_help(f, app, chunks[3]);
@@ -1346,6 +1356,105 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
     let list = List::new(lines).block(Block::default().borders(Borders::NONE));
     let mut state = ListState::default().with_offset(offset);
     f.render_stateful_widget(list, area, &mut state);
+}
+
+/// The master-detail "detail" pane: an attention/status header for the selected
+/// session, its latest output, and its worktree diff. Backed by `app.detail`,
+/// which `maybe_refresh_detail` keeps fresh on a short timer.
+fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
+    // Very thin/short terminals: collapse to a single hint line.
+    if area.width < 24 || area.height < 5 {
+        let hint = Paragraph::new(Line::from(Span::styled(
+            "◧ detail",
+            Style::default().fg(current().muted),
+        )));
+        f.render_widget(hint, area);
+        return;
+    }
+
+    let Some(name) = app.selected_session_name() else {
+        let hint = Paragraph::new(Line::from(Span::styled(
+            "Select a session to see its output and diff",
+            Style::default().fg(current().muted),
+        )));
+        f.render_widget(hint, area);
+        return;
+    };
+
+    let status = app
+        .session_statuses
+        .get(&name)
+        .copied()
+        .unwrap_or(SessionStatus::Finished);
+    let (status_icon, status_color) = status_glyph(status, app.tick);
+    let status_label = match status {
+        SessionStatus::Running => "running",
+        SessionStatus::WaitingForInput => "awaiting input",
+        SessionStatus::WaitingForPermission => "needs permission",
+        SessionStatus::Finished => "finished",
+    };
+
+    let mut header = vec![
+        Span::styled(format!("{status_icon} "), Style::default().fg(status_color)),
+        Span::styled(
+            name.clone(),
+            Style::default()
+                .fg(current().accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(icon) = agent_icon_span(app, &name) {
+        header.push(icon);
+    }
+    header.push(Span::styled(
+        format!("  {status_label}"),
+        Style::default().fg(status_color),
+    ));
+    if let Some(branch) = app.session_branches.get(&name) {
+        header.push(Span::styled(
+            format!("  ⎇ {branch}"),
+            Style::default().fg(current().muted),
+        ));
+    }
+    if let Some(res) = app.resources.get(&name).map(resource_label) {
+        header.push(Span::styled(
+            format!("  {res}"),
+            Style::default().fg(current().muted),
+        ));
+    }
+
+    let detail = app.detail.as_ref().filter(|d| d.session == name);
+
+    let dl = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(2),
+        Constraint::Min(2),
+    ])
+    .split(area);
+
+    f.render_widget(Paragraph::new(Line::from(header)), dl[0]);
+
+    let output_text = detail
+        .and_then(|d| d.output.as_deref())
+        .unwrap_or("(no output yet)");
+    let output_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(current().border))
+        .title(" output ")
+        .title_style(Style::default().fg(current().muted));
+    let output = Paragraph::new(output_text).block(output_block).wrap(Wrap { trim: false });
+    f.render_widget(output, dl[1]);
+
+    let diff_text = detail
+        .and_then(|d| d.diff.as_deref())
+        .unwrap_or("(no diff)");
+    let diff_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(current().border))
+        .title(" diff ")
+        .title_style(Style::default().fg(current().muted));
+    let diff = Paragraph::new(diff_text).block(diff_block).wrap(Wrap { trim: false });
+    f.render_widget(diff, dl[2]);
 }
 
 fn draw_context_menu(f: &mut Frame, app: &App, area: Rect) {

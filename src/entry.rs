@@ -462,6 +462,9 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         app.apply_op_results();
         app.apply_review_requests();
         app.maybe_reload_config();
+        // Refresh the master-detail pane for the currently selected session
+        // (only actually fetches when stale or the selection changed).
+        app.maybe_refresh_detail();
         app.tick = app.tick.wrapping_add(1);
 
         if app.should_quit {
