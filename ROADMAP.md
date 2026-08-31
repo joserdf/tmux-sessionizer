@@ -125,7 +125,7 @@ Fork showrunner, build from source, understand the codebase. Set up the Rust wor
 
 ## Status (2026-08) & next up
 
-**Phases 0–3 are done; Phase 4 is mostly done.** It all ships as a single Rust
+**Phases 0–4 are complete.** It all ships as a single Rust
 binary (`showrunner`) — daemon + TUI + web UI + CLI in one crate (not the
  multi-crate workspace Phase 0 sketched). `cargo build` + `cargo test` (180 pass)
  are the gates; the legacy bash TUI was dropped in favour of the Rust one.
@@ -140,8 +140,9 @@ Actuals vs. the locked decisions above:
   the legacy `notify` (turn-complete). Each POSTs to `/api/hook`; the worker correlates
   by `cwd` and applies the status. Pi uses the pane-scrape fallback.
 
-Next up (unblocked by the current work):
-1. **Web/mobile SSE client** — convert `src/web/app.js` from `setInterval` polling to
-   `EventSource` on `/events` (now cheap: emit-on-change + keepalive).
-2. **Tighter idle/finished policy** — trust authoritative `Finished`/idle over the
-   pane scrape for hook-wired agents.
+Remaining / deferred:
+- **display-popup** diff/resource viewers — superseded by the in-TUI overlays
+  (better UX); not reimplementing.
+- **Tighter idle/finished policy** — already satisfied: hook events apply as a
+  one-shot status override on the next tick (zero pane-scrape latency), and the
+  3-tick stability + finished guards cover the hook-less cases.
