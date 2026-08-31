@@ -38,13 +38,12 @@ export default async ({ directory }) => {
         case "session.created":
           post("session.start")
           break
-        // The agent finished a turn and is idle (canonical signal).
+        // The agent finished a turn and is idle. `session.status` with
+        // type "idle" is the canonical signal; we deliberately ignore the
+        // deprecated `session.idle` event (OpenCode still emits it alongside
+        // session.status) so the daemon isn't sent a duplicate finish per turn.
         case "session.status":
           if (props.status && props.status.type === "idle") post("session.finish")
-          break
-        // Legacy idle event (still emitted alongside session.status).
-        case "session.idle":
-          post("session.finish")
           break
         case "session.error":
           post("session.error", { message: (props.error && props.error.message) || "error" })
