@@ -13,6 +13,7 @@ let statePoll = null;
 let outputPoll = null;
 let current = null; // { tmuxName, title }
 let killArmed = false;
+let eventSource = null; // push-based /events stream (primary state source)
 
 // ---------- helpers ----------
 
@@ -107,8 +108,26 @@ async function refreshState() {
     $("loading") && ($("loading").textContent = "connection lost — retrying…");
     return;
   }
+  applyState(state);
+}
+
+// Apply a state snapshot, whether it arrived over the /events SSE stream or via
+// a one-shot /api/state fetch. With a session open, update its status in place;
+// otherwise re-render the project tree.
+function applyState(state) {
   $("host").textContent = `@${state.host || "?"}`;
   lastProjects = state.projects || [];
+  if (current) {
+    for (const p of lastProjects) {
+      const all = [...(p.tasks || []).flatMap((t) => t.sessions || []), ...(p.adhoc_sessions || [])];
+      const found = all.find((s) => s.tmux_name === current.tmuxName);
+      if (found) {
+        setStatus(found.status);
+        return;
+      }
+    }
+    return;
+  }
   renderProjects(lastProjects);
 }
 
@@ -470,22 +489,6 @@ async function refreshOutput(force) {
   }
 }
 
-async function refreshSessionStatus() {
-  if (!current) return;
-  try {
-    const state = await api("/api/state");
-    $("host").textContent = `@${state.host || "?"}`;
-    for (const p of state.projects || []) {
-      const all = [...(p.tasks || []).flatMap((t) => t.sessions || []), ...(p.adhoc_sessions || [])];
-      const found = all.find((s) => s.tmux_name === current.tmuxName);
-      if (found) {
-        setStatus(found.status);
-        return;
-      }
-    }
-  } catch (e) {}
-}
-
 async function sendMessage() {
   if (!current) return;
   const msg = $("msg");
@@ -801,10 +804,27 @@ msg.addEventListener("input", () => {
 });
 
 refreshState();
-statePoll = setInterval(() => {
-  if (current) refreshSessionStatus();
-  else refreshState();
-}, 3000);
+openStateStream();
+// The /events SSE stream is the primary, push-based state source (it
+// auto-reconnects and emits only on change). A slow poll is a safety net for
+// browsers without EventSource or a wedged stream.
+statePoll = setInterval(refreshState, 15000);
+
+function openStateStream() {
+  if (eventSource || typeof EventSource === "undefined") return;
+  try {
+    eventSource = new EventSource("/events");
+  } catch (e) {
+    return; // fall back to the poll
+  }
+  eventSource.addEventListener("state", (e) => {
+    try {
+      applyState(JSON.parse(e.data));
+    } catch (err) {
+      /* ignore a malformed frame */
+    }
+  });
+}
 
 window.addEventListener("resize", () => {
   if (current) fitTerm(lastCols);
