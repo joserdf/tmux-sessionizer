@@ -151,6 +151,11 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         KeyCode::Char(c) if c == kb.search => app.start_search(),
                         KeyCode::Char(c) if c == kb.cycle_theme => app.cycle_theme(),
                         KeyCode::Char(c) if c == kb.resources => app.toggle_resources(),
+                        // Master-detail pane: PageUp/PageDown scroll the focused
+                        // section (output or diff); Tab toggles the focus.
+                        KeyCode::PageDown => app.detail_scroll_down(),
+                        KeyCode::PageUp => app.detail_scroll_up(),
+                        KeyCode::Tab => app.toggle_detail_focus(),
                         _ => {}
                     },
                     InputMode::ContextMenu => match key.code {

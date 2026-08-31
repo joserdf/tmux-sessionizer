@@ -43,6 +43,24 @@ fn run_indicator(app: &App, item: &app::ListItem) -> Option<Span<'static>> {
     }
 }
 
+/// Red "✗" error attention for a session row, shown when the detail pane (the
+/// selected session's fetched output) looks like an error. `None` otherwise, so
+/// unselected sessions — whose output isn't fetched — carry no badge.
+fn detail_error_span(app: &App, name: &str) -> Option<Span<'static>> {
+    let has_error = app
+        .detail
+        .as_ref()
+        .map_or(false, |d| d.session == name && d.has_error);
+    has_error.then(|| {
+        Span::styled(
+            "  ✗",
+            Style::default()
+                .fg(current().red)
+                .add_modifier(Modifier::BOLD),
+        )
+    })
+}
+
 /// Status icon + colour for a session, used both inline and for the status rail.
 
 /// Dim glyph identifying the harness a session runs (✻ claude, ⬡ codex, π pi).
@@ -1127,6 +1145,9 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
                 if let Some(ind) = run_indicator(app, item) {
                     spans.push(ind);
                 }
+                if let Some(err) = detail_error_span(app, &session.name) {
+                    spans.push(err);
+                }
                 let resources = app
                     .resources
                     .get(&session.name)
@@ -1196,6 +1217,9 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
                 }
                 if let Some(ind) = run_indicator(app, item) {
                     left.push(ind);
+                }
+                if let Some(err) = detail_error_span(app, &session.name) {
+                    left.push(err);
                 }
 
                 // --- right-hand metadata columns: churn | branch | resources ---
@@ -1410,6 +1434,18 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         format!("  {status_label}"),
         Style::default().fg(status_color),
     ));
+
+    let detail = app.detail.as_ref().filter(|d| d.session == name);
+    // Error attention: a red "✗ error" badge when the recent output looks like
+    // an error, surfacing the "erro" attention alongside permission/idle.
+    if detail.map_or(false, |d| d.has_error) {
+        header.push(Span::styled(
+            "  ✗ error",
+            Style::default()
+                .fg(current().red)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(branch) = app.session_branches.get(&name) {
         header.push(Span::styled(
             format!("  ⎇ {branch}"),
@@ -1423,8 +1459,6 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    let detail = app.detail.as_ref().filter(|d| d.session == name);
-
     let dl = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(2),
@@ -1434,27 +1468,48 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(Paragraph::new(Line::from(header)), dl[0]);
 
+    let focus = app.detail_focus.get();
+    let output_focused = focus == app::DetailFocus::Output;
     let output_text = detail
         .and_then(|d| d.output.as_deref())
         .unwrap_or("(no output yet)");
-    let output_block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(current().border))
-        .title(" output ")
-        .title_style(Style::default().fg(current().muted));
-    let output = Paragraph::new(output_text).block(output_block).wrap(Wrap { trim: false });
+    let output_block = detail_block(" output ", output_focused);
+    let output = Paragraph::new(output_text)
+        .block(output_block)
+        .scroll((app.detail_output_scroll.get(), 0))
+        .wrap(Wrap { trim: false });
     f.render_widget(output, dl[1]);
 
+    let diff_focused = focus == app::DetailFocus::Diff;
     let diff_text = detail
         .and_then(|d| d.diff.as_deref())
         .unwrap_or("(no diff)");
-    let diff_block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(current().border))
-        .title(" diff ")
-        .title_style(Style::default().fg(current().muted));
-    let diff = Paragraph::new(diff_text).block(diff_block).wrap(Wrap { trim: false });
+    let diff_block = detail_block(" diff ", diff_focused);
+    let diff = Paragraph::new(diff_text)
+        .block(diff_block)
+        .scroll((app.detail_diff_scroll.get(), 0))
+        .wrap(Wrap { trim: false });
     f.render_widget(diff, dl[2]);
+}
+
+/// Top-bordered block for a detail-pane section. The focused section gets a
+/// brighter border + bold title so the user knows which one PageUp/Down scrolls.
+fn detail_block(title: &str, focused: bool) -> Block<'_> {
+    let (border, title_style) = if focused {
+        (
+            current().accent,
+            Style::default()
+                .fg(current().accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (current().border, Style::default().fg(current().muted))
+    };
+    Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(border))
+        .title(title)
+        .title_style(title_style)
 }
 
 fn draw_context_menu(f: &mut Frame, app: &App, area: Rect) {

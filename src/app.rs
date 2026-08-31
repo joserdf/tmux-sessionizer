@@ -299,9 +299,36 @@ pub struct SessionDetail {
     pub session: String,
     /// The agent's recent output (plain capture, trailing chrome/blank trimmed).
     pub output: Option<String>,
-    /// The session worktree's git diff vs its task branch (full text).
+    /// The session worktree's git diff vs its task branch (truncated to a
+    /// render-safe size; see [`DIFF_MAX_LINES`]).
     pub diff: Option<String>,
+    /// Whether the recent output looks like an error (heuristic, see
+    /// [`looks_like_error`]).
+    pub has_error: bool,
     pub fetched_at: Instant,
+}
+
+/// Cap on the diff text kept in the detail pane, so a huge worktree diff can't
+/// make rendering sluggish. Lines beyond this are dropped (the tail is cut).
+pub const DIFF_MAX_LINES: usize = 200;
+
+/// Which section of the detail pane is focused (and scrolled by PageUp/Down).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailFocus {
+    Output,
+    Diff,
+}
+
+/// Cheap heuristic for "this output looks like an error", used to surface an
+/// error attention badge for the selected session. Looks for a line that opens
+/// with an error marker (case-insensitive) or contains an inline "error:".
+fn looks_like_error(output: &str) -> bool {
+    output.lines().any(|l| {
+        let t = l.trim();
+        t.to_lowercase().starts_with("error")
+            || t.contains("error:")
+            || t.starts_with("fatal")
+    })
 }
 
 /// Light cleanup of a plain pane capture for the detail pane: drop leading and
@@ -422,6 +449,12 @@ pub struct App {
     pub list_offset: std::cell::Cell<u16>,
     /// Detail-pane cache for the selected session (latest output + diff).
     pub detail: Option<SessionDetail>,
+    /// Which detail-pane section (output vs diff) is focused for scrolling.
+    pub detail_focus: std::cell::Cell<DetailFocus>,
+    /// Scroll offsets (in lines) for the output and diff sections of the
+    /// detail pane, applied via `Paragraph::scroll`.
+    pub detail_output_scroll: std::cell::Cell<u16>,
+    pub detail_diff_scroll: std::cell::Cell<u16>,
 }
 
 pub struct OpResult {
@@ -689,6 +722,9 @@ impl App {
             hostname: detect_hostname(),
             list_offset: std::cell::Cell::new(0),
             detail: None,
+            detail_focus: std::cell::Cell::new(DetailFocus::Output),
+            detail_output_scroll: std::cell::Cell::new(0),
+            detail_diff_scroll: std::cell::Cell::new(0),
         };
         // Start with all tasks collapsed, and projects with no tasks collapsed
         for project in &app.config.projects {
@@ -1037,14 +1073,59 @@ impl App {
         if !stale {
             return;
         }
+        // Starting to look at a different session: drop its old scroll state.
+        if self.detail.as_ref().map_or(true, |d| d.session != session) {
+            self.detail_output_scroll.set(0);
+            self.detail_diff_scroll.set(0);
+        }
         let output = tmux::capture_output_plain(&session, 150).map(trim_detail_output);
-        let diff = tmux::get_session_diff_text(&session);
+        let has_error = output.as_deref().map_or(false, looks_like_error);
+        // Truncate the diff to a render-safe length: keep the first
+        // DIFF_MAX_LINES lines, then a marker so it's clear output was cut.
+        let diff = tmux::get_session_diff_text(&session).map(|d| {
+            let mut lines: Vec<&str> = d.lines().collect();
+            if lines.len() > DIFF_MAX_LINES {
+                lines.truncate(DIFF_MAX_LINES);
+                lines.push("… diff truncated");
+            }
+            lines.join("\n")
+        });
         self.detail = Some(SessionDetail {
             session,
             output,
             diff,
+            has_error,
             fetched_at: Instant::now(),
         });
+    }
+
+    /// Scroll the focused detail pane down by one line (clamped at the end is
+    /// left to the Paragraph; we only keep it from going negative).
+    pub fn detail_scroll_down(&self) {
+        let f = self.detail_focus.get();
+        self.detail_offset(f).set(self.detail_offset(f).get().saturating_add(1));
+    }
+
+    /// Scroll the focused detail pane up, never above the top.
+    pub fn detail_scroll_up(&self) {
+        let f = self.detail_focus.get();
+        self.detail_offset(f).set(self.detail_offset(f).get().saturating_sub(1));
+    }
+
+    /// Move the detail-pane focus between the output and diff sections.
+    pub fn toggle_detail_focus(&self) {
+        let next = match self.detail_focus.get() {
+            DetailFocus::Output => DetailFocus::Diff,
+            DetailFocus::Diff => DetailFocus::Output,
+        };
+        self.detail_focus.set(next);
+    }
+
+    fn detail_offset(&self, focus: DetailFocus) -> &std::cell::Cell<u16> {
+        match focus {
+            DetailFocus::Output => &self.detail_output_scroll,
+            DetailFocus::Diff => &self.detail_diff_scroll,
+        }
     }
 
     /// Get the project context for the currently selected item.
@@ -3491,5 +3572,28 @@ mod tests {
         assert!(prompt.contains("- rename foo"));
         assert!(prompt.contains("- drop bar"));
         assert!(prompt.contains("Please address them"));
+    }
+
+    #[test]
+    fn looks_like_error_flags_agent_errors() {
+        assert!(looks_like_error("Error: build failed"));
+        assert!(looks_like_error("error: cannot find crate"));
+        assert!(looks_like_error("  Error: permission denied"));
+        assert!(looks_like_error("fatal: not a git repository"));
+        assert!(looks_like_error("something error: happened inline"));
+        // Benign output is not flagged.
+        assert!(!looks_like_error("no error, all good"));
+        assert!(!looks_like_error("server started"));
+        assert!(!looks_like_error(""));
+    }
+
+    #[test]
+    fn detail_focus_toggles_between_sections() {
+        let a = DetailFocus::Output;
+        let b = match a {
+            DetailFocus::Output => DetailFocus::Diff,
+            DetailFocus::Diff => DetailFocus::Output,
+        };
+        assert_eq!(b, DetailFocus::Diff);
     }
 }
