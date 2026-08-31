@@ -25,6 +25,8 @@ The old pure-bash session picker is gone; bash is now a thin tmux bootstrap.
 
 - Rust toolchain (to build), `tmux` 3.2+ (for `display-popup`), `git`
 - The agent CLIs you want to use: `claude`, `opencode`, `codex`, `pi`
+- `python3` (the Claude and Codex hook clients use it to forward events to the
+  daemon; without it the hooks no-op and status falls back to pane-scrape)
 - `nvidia-smi` for GPU metrics (optional)
 - `hunk` for diff review (falls back to `npx -y hunkdiff` if absent)
 
@@ -107,7 +109,9 @@ Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
   conversation; preserves worktree/branch)
 - Auto-close sessions (idle + finished, dirty-worktree safeguard; opt-in)
 - OS notifications when a session needs a decision (permission prompt, etc.)
-- Authoritative agent hooks (Claude / OpenCode / Codex) via the daemon
+- Authoritative agent hooks via the daemon — Claude Code (plugin `hooks.json`),
+  OpenCode (auto-loaded plugin), and Codex (`notify` on turn-complete); Pi uses
+  the pane-scrape fallback
 - Project auto-discovery (`showrunner discover` — git / zoxide / ghq)
 - Daemon with HTTP + SSE on localhost, plus a small web UI
 - TUI consumes the daemon's SSE (`/events/worker`) as its live data source. When

@@ -134,6 +134,9 @@ pub fn parse_opencode_hook(json: &str) -> Option<AgentEvent> {
         "session.start" => Some(AgentEvent::SessionStarted),
         "session.finish" => Some(AgentEvent::Finished),
         "session.idle" => Some(AgentEvent::Idle),
+        // Emitted by the plugin's `dispose` hook when the opencode instance
+        // shuts down (there is no dedicated "session end" bus event).
+        "session.stop" => Some(AgentEvent::SessionStopped),
         "session.error" => {
             let message = value.get("message").and_then(|v| v.as_str()).unwrap_or("error");
             Some(AgentEvent::Error(message.to_owned()))
@@ -338,6 +341,13 @@ mod tests {
     fn opencode_permission_request() {
         let json = r#"{"type":"permission.request","message":"Allow bash command?"}"#;
         assert_eq!(parse_opencode_hook(json), Some(AgentEvent::PermissionRequest));
+    }
+
+    #[test]
+    fn opencode_session_stop() {
+        // The plugin's dispose hook emits this when the instance shuts down.
+        let json = r#"{"type":"session.stop","cwd":"/w"}"#;
+        assert_eq!(parse_opencode_hook(json), Some(AgentEvent::SessionStopped));
     }
 
     #[test]

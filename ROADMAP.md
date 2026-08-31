@@ -127,23 +127,21 @@ Fork showrunner, build from source, understand the codebase. Set up the Rust wor
 
 **Phases 0–3 are done; Phase 4 is mostly done.** It all ships as a single Rust
 binary (`showrunner`) — daemon + TUI + web UI + CLI in one crate (not the
-multi-crate workspace Phase 0 sketched). `cargo build` + `cargo test` (176 pass)
-are the gates; the legacy bash TUI was dropped in favour of the Rust one.
+ multi-crate workspace Phase 0 sketched). `cargo build` + `cargo test` (180 pass)
+ are the gates; the legacy bash TUI was dropped in favour of the Rust one.
 
 Actuals vs. the locked decisions above:
 - **Rendering:** the diff and resource panels are **in-TUI overlays** (Ratatui),
   not `tmux display-popup` external viewers — the popup decision was superseded.
 - **Notifications:** unified to the tmux status-bar badge (daemon-written
   `status.cache`) + OS notify. The "bell" was never functional and was removed.
-- **Authoritative hooks:** implemented and wired for **Claude only** (plugin
-  `hooks.json` + `post-event.sh` → `POST /api/hook` → worker inbox → status). The
-  OpenCode and Codex hook *parsers* exist, but no client installs/posts yet.
+- **Authoritative hooks:** wired for **Claude, OpenCode, and Codex** — Claude via the
+  plugin `hooks.json`, OpenCode via an auto-loaded `.opencode/plugins/` file, Codex via
+  the legacy `notify` (turn-complete). Each POSTs to `/api/hook`; the worker correlates
+  by `cwd` and applies the status. Pi uses the pane-scrape fallback.
 
 Next up (unblocked by the current work):
-1. **OpenCode + Codex hook clients** — bundle/install the hook emitters for the two
-   remaining agents so status is authoritative for all four (the parsers, the worker
-   inbox, and the loopback guard are already in place).
-2. **Web/mobile SSE client** — convert `src/web/app.js` from `setInterval` polling to
+1. **Web/mobile SSE client** — convert `src/web/app.js` from `setInterval` polling to
    `EventSource` on `/events` (now cheap: emit-on-change + keepalive).
-3. **Tighter idle/finished policy** — trust authoritative `Finished`/idle over the
+2. **Tighter idle/finished policy** — trust authoritative `Finished`/idle over the
    pane scrape for hook-wired agents.

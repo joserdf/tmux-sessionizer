@@ -1072,6 +1072,8 @@ fn build_agent_command(
             // Codex shows a per-directory trust dialog on first launch, even
             // in yolo mode — pre-trust the work dir so sessions never stall.
             ensure_codex_trust(work_dir);
+            // Wire legacy `notify` so a completed turn reports idle to the daemon.
+            ensure_codex_notify();
             let mut cmd = String::from("codex");
             if resume {
                 // cwd-scoped: resumes the most recent session for this work dir.
@@ -1154,6 +1156,72 @@ fn ensure_codex_trust(work_dir: &str) {
     }
     updated.push_str(&format!("\n{header}\ntrust_level = \"trusted\"\n"));
     let _ = fs::write(&config_path, updated);
+}
+
+/// The top-level `notify` line to add to a codex config, pointing at `script`.
+/// The path is a concrete absolute path (codex spawns `notify` directly, so env
+/// vars like `$HOME` are not expanded) and is TOML-escaped so a path with a
+/// backslash or quote can't corrupt the user's config.
+fn codex_notify_config_line(script: &str) -> String {
+    let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("notify = [\"bash\", \"{escaped}\"]\n")
+}
+
+/// True if `content` (a codex config.toml) already sets a top-level `notify`
+/// key — i.e. a `notify` assignment before the first `[section]` header. We
+/// must not clobber a user's own notify, so this is the respect-the-user check.
+fn config_has_top_level_notify(content: &str) -> bool {
+    content
+        .lines()
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .any(|l| {
+            let t = l.trim_start();
+            t == "notify" || t.starts_with("notify ")
+        })
+}
+
+/// Wire codex's legacy `notify` to the showrunner daemon so a completed turn
+/// (agent idle) is reported without pane-scrape latency. Installs the handler
+/// script into the showrunner state dir and adds a top-level `notify` to the
+/// user's `~/.codex/config.toml` — only if the user hasn't set one. Best-effort:
+/// any failure leaves codex on its existing (pane-scrape) detection.
+///
+/// Legacy `notify` is used (rather than the newer hooks engine) because it has
+/// no trust gate — an untrusted project hook could stall a headless codex pane,
+/// and the bypass flag may be missing on older codex versions. Codex is launched
+/// yolo (`--dangerously-bypass-approvals-and-sandbox`), so it rarely emits
+/// permission prompts; the process-liveness probe already covers session end.
+fn ensure_codex_notify() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    // Install the stable handler script once (idempotent).
+    let hooks_dir = crate::config::base_dir().join("hooks");
+    if fs::create_dir_all(&hooks_dir).is_err() {
+        return;
+    }
+    let script = hooks_dir.join("codex-notify.sh");
+    if fs::write(&script, CODEX_NOTIFY).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&script, fs::Permissions::from_mode(0o755));
+        }
+    }
+    let script_path = script.to_string_lossy().to_string();
+
+    // Add `notify` to the user's codex config, respecting an existing one.
+    let config_dir = home.join(".codex");
+    let config_path = config_dir.join("config.toml");
+    let content = fs::read_to_string(&config_path).unwrap_or_default();
+    if config_has_top_level_notify(&content) {
+        return;
+    }
+    let mut updated = codex_notify_config_line(&script_path);
+    updated.push_str(&content);
+    if fs::create_dir_all(&config_dir).is_ok() {
+        let _ = fs::write(&config_path, updated);
+    }
 }
 
 fn get_session_env(session_name: &str, var: &str) -> Option<String> {
@@ -1378,6 +1446,10 @@ const PLUGIN_SKILL_MANAGE_SESSIONS: &str =
 const PLUGIN_HOOKS_JSON: &str = include_str!("../showrunner-plugin/hooks/hooks.json");
 const PLUGIN_HOOKS_POST_EVENT: &str =
     include_str!("../showrunner-plugin/hooks/post-event.sh");
+// Authoritative lifecycle hooks for the non-Claude agents: an OpenCode plugin
+// (auto-loaded from <project>/.opencode/plugins/) and a Codex `notify` handler.
+const OPENCODE_PLUGIN: &str = include_str!("../showrunner-plugin/opencode/showrunner.ts");
+const CODEX_NOTIFY: &str = include_str!("../showrunner-plugin/codex/codex-notify.sh");
 
 /// Filesystem path to the installed showrunner plugin directory inside `work_dir`.
 /// This is the path passed to `claude --plugin-dir`.
@@ -1392,13 +1464,29 @@ fn showrunner_plugin_path(work_dir: &str) -> String {
 
 /// Install the showrunner skills in whatever form the agent discovers them:
 /// a Claude Code plugin for Claude, plain SKILL.md folders under
-/// `.agents/skills/` (the cross-agent location) for everyone else.
+/// `.agents/skills/` (the cross-agent location) for everyone else. For
+/// OpenCode it also drops the lifecycle-hook plugin (Codex's hook is wired at
+/// launch time, not per work dir — see `ensure_codex_notify`).
 fn install_agent_skills(agent: AgentKind, work_dir: &str) {
     if agent.supports_plugin_dir() {
         install_showrunner_plugin(work_dir);
     } else {
         install_agents_dir_skills(work_dir);
     }
+    if agent == AgentKind::OpenCode {
+        install_opencode_plugin(work_dir);
+    }
+}
+
+/// Install the showrunner OpenCode plugin into `<work_dir>/.opencode/plugins/`.
+/// OpenCode auto-loads every file in that directory, so no config edit is
+/// needed; the plugin forwards session lifecycle events to the daemon.
+fn install_opencode_plugin(work_dir: &str) {
+    let plugins_dir = Path::new(work_dir).join(".opencode").join("plugins");
+    let _ = fs::create_dir_all(&plugins_dir);
+    let _ = fs::write(plugins_dir.join("showrunner.ts"), OPENCODE_PLUGIN);
+    // Keep the injected plugin out of the worktree's git status.
+    add_git_excludes(work_dir, &[".opencode/plugins/showrunner.ts"]);
 }
 
 /// Install the two showrunner skills as plain SKILL.md folders under
@@ -2944,5 +3032,45 @@ Some transcript output.\n\
         assert!(worktree_dirty_failsafe(&p), "untracked file should read dirty");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The OpenCode hook client must be installed into
+    /// `<work_dir>/.opencode/plugins/` (where OpenCode auto-loads it) so
+    /// lifecycle events reach the daemon.
+    #[test]
+    fn install_opencode_plugin_writes_plugin() {
+        let dir = std::env::temp_dir().join(format!("sr_opencode_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        install_opencode_plugin(&dir.to_string_lossy());
+
+        let plugin = dir.join(".opencode/plugins/showrunner.ts");
+        assert!(plugin.exists(), "OpenCode plugin was not installed");
+        let content = std::fs::read_to_string(&plugin).unwrap();
+        assert!(content.contains("agent: \"opencode\""), "plugin must tag events as opencode");
+        assert!(content.contains("session.status"), "plugin must emit turn-finished on idle");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_notify_line_is_valid_and_escaped() {
+        assert_eq!(
+            codex_notify_config_line("/home/u/.showrunner/hooks/codex-notify.sh"),
+            "notify = [\"bash\", \"/home/u/.showrunner/hooks/codex-notify.sh\"]\n"
+        );
+        // A path with a double quote is escaped so the config stays valid TOML.
+        assert!(codex_notify_config_line("/home/a\"b/x.sh").contains(r#""/home/a\"b/x.sh""#));
+    }
+
+    #[test]
+    fn config_has_top_level_notify_detects_and_respects() {
+        assert!(config_has_top_level_notify("notify = [\"bash\", \"/x\"]\nmodel=\"m\"\n"));
+        // A `notify` inside a section is not top-level -> we'd add a global one.
+        assert!(!config_has_top_level_notify("model=\"m\"\n[some.section]\nnotify = [\"bash\"]\n"));
+        assert!(!config_has_top_level_notify("model=\"m\"\n"));
+        // A similarly-named key must not false-positive.
+        assert!(!config_has_top_level_notify("notification = true\n"));
     }
 }
