@@ -116,6 +116,12 @@ fn kb_resources() -> char {
 fn kb_send_message() -> char {
     'm'
 }
+fn kb_view_live() -> char {
+    'v'
+}
+fn cm_view_live() -> char {
+    'V'
+}
 
 fn is_false(b: &bool) -> bool {
     !*b
@@ -193,6 +199,9 @@ pub struct ContextMenuKeyBindings {
     /// conversation) (default: R)
     #[serde(default = "cm_restart")]
     pub restart: char,
+    /// Show the selected session's live terminal in a tmux popup (default: V)
+    #[serde(default = "cm_view_live")]
+    pub view_live: char,
 }
 
 impl Default for ContextMenuKeyBindings {
@@ -220,6 +229,7 @@ impl Default for ContextMenuKeyBindings {
             send_message: cm_send_message(),
             approve: cm_approve(),
             restart: cm_restart(),
+            view_live: cm_view_live(),
         }
     }
 }
@@ -262,6 +272,9 @@ pub struct KeyBindings {
     /// Send a message to the selected session (default: m)
     #[serde(default = "kb_send_message")]
     pub send_message: char,
+    /// Show the selected session's live terminal in a tmux popup (default: v)
+    #[serde(default = "kb_view_live")]
+    pub view_live: char,
     /// Context menu action keybindings
     #[serde(default)]
     pub context_menu_keys: ContextMenuKeyBindings,
@@ -281,6 +294,7 @@ impl Default for KeyBindings {
             cycle_theme: kb_cycle_theme(),
             resources: kb_resources(),
             send_message: kb_send_message(),
+            view_live: kb_view_live(),
             context_menu_keys: ContextMenuKeyBindings::default(),
         }
     }

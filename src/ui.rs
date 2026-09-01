@@ -1445,7 +1445,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     let detail = app.detail.as_ref().filter(|d| d.session == name);
     // Error attention: a red "✗ error" badge when the recent output looks like
     // an error, surfacing the "erro" attention alongside permission/idle.
-    if detail.map_or(false, |d| d.has_error) {
+    if detail.is_some_and(|d| d.has_error) {
         header.push(Span::styled(
             "  ✗ error",
             Style::default()
@@ -1517,7 +1517,10 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 /// and Enter sends to the selected agent.
 fn draw_chat_input(f: &mut Frame, app: &App, area: Rect) {
     let line = if app.input_mode == InputMode::SendMessage {
-        let last = app.input_buffer.rsplit('\n').next().unwrap_or("");
+        // Single-line composer: render the buffer with the cursor between the
+        // left and right halves.
+        let buf = &app.input_buffer;
+        let cur = app.input_cursor.min(buf.len());
         Line::from(vec![
             Span::styled(
                 "> ",
@@ -1525,16 +1528,15 @@ fn draw_chat_input(f: &mut Frame, app: &App, area: Rect) {
                     .fg(current().accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                last.to_string(),
-                Style::default().fg(current().white),
-            ),
+            Span::styled(buf[..cur].to_string(), Style::default().fg(current().white)),
             Span::styled("▌", Style::default().fg(current().accent)),
+            Span::styled(buf[cur..].to_string(), Style::default().fg(current().white)),
         ])
     } else {
-        let key = key_display(app.keybindings.send_message);
+        let msg_key = key_display(app.keybindings.send_message);
+        let view_key = key_display(app.keybindings.view_live);
         Line::from(Span::styled(
-            format!("{key}: message to agent · Tab: output/diff"),
+            format!("→ enter chat · {msg_key} · {view_key}: live view"),
             Style::default().fg(current().muted),
         ))
     };
@@ -1872,11 +1874,11 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             ("↑/↓", "navigate"),
             ("Esc", "cancel"),
         ]),
-        InputMode::AddTaskPrompt
-        | InputMode::AddSessionPrompt
-        | InputMode::MergeCommitMessage
-        | InputMode::SendMessage => {
+        InputMode::AddTaskPrompt | InputMode::AddSessionPrompt | InputMode::MergeCommitMessage => {
             help_bar(&[("⏎", "confirm"), ("⌥⏎", "newline"), ("Esc", "cancel")])
+        }
+        InputMode::SendMessage => {
+            help_bar(&[("⏎", "send"), ("←", "sidebar at start"), ("Esc", "back")])
         }
         InputMode::AddProjectName
         | InputMode::AddSessionName

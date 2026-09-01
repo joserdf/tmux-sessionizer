@@ -135,6 +135,8 @@ pub enum ContextAction {
     /// Restart the selected session's agent (kill + relaunch, resuming the
     /// conversation).
     Restart,
+    /// Show the selected session's live terminal in a tmux popup (no redirect).
+    ViewLive,
 }
 
 /// Where a "Run" action should execute: the owning project (whose `run_command`
@@ -331,6 +333,52 @@ fn looks_like_error(output: &str) -> bool {
     })
 }
 
+/// Cursor one char left (UTF-8 safe), clamped at the start.
+fn cursor_left(buf: &str, cur: usize) -> usize {
+    if cur == 0 {
+        return 0;
+    }
+    let mut i = cur - 1;
+    while !buf.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Cursor one char right (UTF-8 safe), clamped at the end.
+fn cursor_right(buf: &str, cur: usize) -> usize {
+    let len = buf.len();
+    if cur >= len {
+        return len;
+    }
+    let mut i = cur + 1;
+    while i < len && !buf.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// Delete the char before the cursor; returns the new cursor position.
+fn backspace_at(buf: &mut String, cur: usize) -> usize {
+    if cur == 0 {
+        return 0;
+    }
+    let mut i = cur - 1;
+    while !buf.is_char_boundary(i) {
+        i -= 1;
+    }
+    buf.replace_range(i..cur, "");
+    i
+}
+
+/// Insert a char at the cursor (newlines collapse to a space for a single-line
+/// composer); returns the new cursor position.
+fn insert_at(buf: &mut String, cur: usize, c: char) -> usize {
+    let c = if c == '\n' { ' ' } else { c };
+    buf.insert(cur, c);
+    cur + c.len_utf8()
+}
+
 /// Light cleanup of a plain pane capture for the detail pane: drop leading and
 /// trailing blank lines. This is "the agent's recent output", not a full
 /// transcript reconstruction.
@@ -361,6 +409,10 @@ pub struct App {
     pub should_attach: Option<String>,
     /// Attach to a specific (session, window index) — used for terminals.
     pub should_attach_window: Option<(String, usize)>,
+    /// Show a selected session's live terminal in a tmux `display-popup` overlay
+    /// (without attaching/redirecting). The TUI is suspended while it's open,
+    /// then resumes when the popup closes.
+    pub should_popup: Option<String>,
     /// Pending foreground hunk review: `(cwd, hunk args, candidate sessions)`.
     /// Set by the review action when the configured tool is `hunk`; the main loop
     /// suspends the TUI, runs hunk on the real terminal, then resumes. Unlike
@@ -449,6 +501,9 @@ pub struct App {
     pub list_offset: std::cell::Cell<u16>,
     /// Detail-pane cache for the selected session (latest output + diff).
     pub detail: Option<SessionDetail>,
+    /// Cursor byte-offset into `input_buffer`, used by the chat (SendMessage)
+    /// input for left/right movement and mid-line editing.
+    pub input_cursor: usize,
     /// Which detail-pane section (output vs diff) is focused for scrolling.
     pub detail_focus: std::cell::Cell<DetailFocus>,
     /// Scroll offsets (in lines) for the output and diff sections of the
@@ -676,6 +731,7 @@ impl App {
             should_quit: false,
             should_attach: None,
             should_attach_window: None,
+            should_popup: None,
             should_review_hunk: None,
             pending_project_path: None,
             pending_task_name: None,
@@ -725,6 +781,7 @@ impl App {
             detail_focus: std::cell::Cell::new(DetailFocus::Output),
             detail_output_scroll: std::cell::Cell::new(0),
             detail_diff_scroll: std::cell::Cell::new(0),
+            input_cursor: 0,
         };
         // Start with all tasks collapsed, and projects with no tasks collapsed
         for project in &app.config.projects {
@@ -1439,6 +1496,11 @@ impl App {
                         label: "Copy worktree path",
                         action: ContextAction::CopyWorktreePath,
                     },
+                    ContextMenuItem {
+                        key: cm.view_live,
+                        label: "View live (popup)",
+                        action: ContextAction::ViewLive,
+                    },
                 ]);
                 if !is_main {
                     items.push(ContextMenuItem {
@@ -1493,6 +1555,7 @@ impl App {
             ContextAction::SendMessage => self.start_send_message(),
             ContextAction::Approve => self.approve_session(),
             ContextAction::Restart => self.restart_session(),
+            ContextAction::ViewLive => self.start_view_live(),
             ContextAction::PickAgent(agent) => self.confirm_agent_picker(agent),
         }
     }
@@ -2065,6 +2128,7 @@ impl App {
         match self.selected_session_name() {
             Some(name) => {
                 self.input_buffer.clear();
+                self.input_cursor = 0;
                 self.status_message = Some(format!("Send message to {name}:"));
                 self.pending_send_session = Some(name);
                 self.input_mode = InputMode::SendMessage;
@@ -2081,6 +2145,7 @@ impl App {
         };
         let msg = self.input_buffer.clone();
         self.input_buffer.clear();
+        self.input_cursor = 0;
         self.input_mode = InputMode::Normal;
         if msg.trim().is_empty() {
             self.status_message = Some("Empty message — nothing sent".into());
@@ -2100,6 +2165,50 @@ impl App {
                 },
             }
         });
+    }
+
+    /// Move the chat cursor one char left. Returns `false` when already at the
+    /// start (caller uses that to hand focus back to the sidebar).
+    pub fn chat_cursor_left(&mut self) -> bool {
+        if self.input_cursor == 0 {
+            return false;
+        }
+        self.input_cursor = cursor_left(&self.input_buffer, self.input_cursor);
+        true
+    }
+
+    /// Move the chat cursor one char right.
+    pub fn chat_cursor_right(&mut self) {
+        self.input_cursor = cursor_right(&self.input_buffer, self.input_cursor);
+    }
+
+    pub fn chat_home(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    pub fn chat_end(&mut self) {
+        self.input_cursor = self.input_buffer.len();
+    }
+
+    /// Delete the char before the chat cursor.
+    pub fn chat_backspace(&mut self) {
+        self.input_cursor = backspace_at(&mut self.input_buffer, self.input_cursor);
+    }
+
+    /// Insert a char at the chat cursor. Newlines are collapsed to a space so
+    /// the composer stays single-line.
+    pub fn chat_insert(&mut self, c: char) {
+        self.input_cursor = insert_at(&mut self.input_buffer, self.input_cursor, c);
+    }
+
+    /// Show the selected session's live terminal in a tmux popup (no redirect).
+    /// The main loop suspends the TUI while the popup is open.
+    pub fn start_view_live(&mut self) {
+        let Some(name) = self.selected_session_name() else {
+            self.status_message = Some("Select a session to view".into());
+            return;
+        };
+        self.should_popup = Some(name);
     }
 
     /// Approve the selected session's pending permission prompt (sends "y").
@@ -3387,6 +3496,7 @@ impl App {
     pub fn cancel_input(&mut self) {
         self.input_mode = InputMode::Normal;
         self.input_buffer.clear();
+        self.input_cursor = 0;
         self.status_message = None;
         self.pending_task_name = None;
         self.pending_task_branch = None;
@@ -3595,5 +3705,41 @@ mod tests {
             DetailFocus::Diff => DetailFocus::Output,
         };
         assert_eq!(b, DetailFocus::Diff);
+    }
+
+    #[test]
+    fn cursor_left_right_clamp_at_edges() {
+        assert_eq!(cursor_left("abc", 0), 0);
+        assert_eq!(cursor_left("abc", 3), 2);
+        assert_eq!(cursor_right("abc", 3), 3);
+        assert_eq!(cursor_right("abc", 1), 2);
+    }
+
+    #[test]
+    fn cursor_is_utf8_char_boundary_safe() {
+        // Multi-byte char: 'é' is 2 bytes; cursor 1 is mid-char.
+        assert_eq!(cursor_left("é", 2), 0);
+        assert_eq!(cursor_right("é", 0), 2);
+        assert_eq!(cursor_right("aé", 1), 3);
+    }
+
+    #[test]
+    fn insert_at_mid_line_and_backspace_before_cursor() {
+        let mut buf = String::from("ac");
+        let mut cur = insert_at(&mut buf, 1, 'b'); // "abc"
+        assert_eq!(buf, "abc");
+        assert_eq!(cur, 2);
+        // Backspace deletes the char before the cursor ('b'), not the end.
+        cur = backspace_at(&mut buf, cur);
+        assert_eq!(buf, "ac");
+        assert_eq!(cur, 1);
+    }
+
+    #[test]
+    fn insert_at_collapses_newline_to_space() {
+        let mut buf = String::from("ab");
+        let cur = insert_at(&mut buf, 1, '\n');
+        assert_eq!(buf, "a b");
+        assert_eq!(cur, 2);
     }
 }

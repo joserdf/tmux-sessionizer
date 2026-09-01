@@ -66,6 +66,10 @@ pub fn run() -> Result<()> {
             tmux::attach_session(&session_name)?;
         } else if let Some((session_name, window_idx)) = app.should_attach_window.take() {
             tmux::attach_session_window(&session_name, window_idx)?;
+        } else if let Some(session_name) = app.should_popup.take() {
+            // Live view: show the agent's window in a tmux popup overlay and
+            // resume the TUI when it closes (no redirect).
+            tmux::popup_session(&session_name)?;
         } else if let Some((cwd, args, candidates)) = app.should_review_hunk.take() {
             // hunk is a terminal TUI: run it on the real terminal (the TUI is
             // suspended here), polling its live session so comments can be
@@ -88,14 +92,13 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 
             if let Event::Paste(data) = evt {
                 if is_text_input_mode(app.input_mode) {
+                    // SendMessage (the chat composer) is single-line: pasted
+                    // newlines collapse to spaces, matching the other single-line
+                    // inputs below.
                     let allow_newlines = matches!(
                         app.input_mode,
-                        InputMode::AddTaskPrompt
-                            | InputMode::AddSessionPrompt
+                        InputMode::AddTaskPrompt | InputMode::AddSessionPrompt
                             | InputMode::MergeCommitMessage
-                            // SendMessage buffer is multi-line (Alt+Enter inserts a
-                            // newline), so pasted newlines are preserved too.
-                            | InputMode::SendMessage
                     );
                     for c in data.chars() {
                         match c {
@@ -152,11 +155,17 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         KeyCode::Char(c) if c == kb.cycle_theme => app.cycle_theme(),
                         KeyCode::Char(c) if c == kb.resources => app.toggle_resources(),
                         KeyCode::Char(c) if c == kb.send_message => app.start_send_message(),
+                        KeyCode::Char(c) if c == kb.view_live => app.start_view_live(),
                         // Master-detail pane: PageUp/PageDown scroll the focused
                         // section (output or diff); Tab toggles the focus.
                         KeyCode::PageDown => app.detail_scroll_down(),
                         KeyCode::PageUp => app.detail_scroll_up(),
                         KeyCode::Tab => app.toggle_detail_focus(),
+                        // Right on a session enters its chat (focus the detail
+                        // pane's input for the selected agent).
+                        KeyCode::Right if app.selected_session_name().is_some() => {
+                            app.start_send_message()
+                        }
                         _ => {}
                     },
                     InputMode::ContextMenu => match key.code {
@@ -359,18 +368,27 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         _ => {}
                     },
                     InputMode::SendMessage => match key.code {
+                        // Single-line composer: Alt+Enter is just a space.
                         KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                            app.input_buffer.push('\n');
+                            app.chat_insert(' ');
                         }
                         KeyCode::Enter => app.confirm_send_message(),
                         KeyCode::Esc => {
                             app.pending_send_session = None;
                             app.cancel_input();
                         }
-                        KeyCode::Backspace => {
-                            app.input_buffer.pop();
+                        // Left at the start of the text box hands focus back to
+                        // the sidebar.
+                        KeyCode::Left if !app.chat_cursor_left() => {
+                            app.pending_send_session = None;
+                            app.cancel_input();
                         }
-                        KeyCode::Char(c) => app.input_buffer.push(c),
+                        KeyCode::Left => {}
+                        KeyCode::Right => app.chat_cursor_right(),
+                        KeyCode::Home => app.chat_home(),
+                        KeyCode::End => app.chat_end(),
+                        KeyCode::Backspace => app.chat_backspace(),
+                        KeyCode::Char(c) => app.chat_insert(c),
                         _ => {}
                     },
                     InputMode::ReviewSessionPicker => match key.code {
@@ -458,6 +476,7 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         // suspend the TUI so the main loop can run it.
         if app.should_attach.is_some()
             || app.should_attach_window.is_some()
+            || app.should_popup.is_some()
             || app.should_review_hunk.is_some()
         {
             return Ok(());

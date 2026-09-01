@@ -809,6 +809,40 @@ pub fn attach_session(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Show a session's live terminal in a `tmux display-popup` overlay over the
+/// current pane — the agent's own window, visible without being redirected to
+/// it. The popup closes (and this returns) when the user detaches (Ctrl-b d) or
+/// presses Esc, returning control to the TUI. Only meaningful when the TUI
+/// itself runs inside a tmux client.
+pub fn popup_session(session_name: &str) -> Result<()> {
+    // `-E` closes the popup when the attached session is detached. The popup
+    // hosts a nested `attach-session` so the user sees the live agent pane and
+    // can interact with it, but the base TUI pane underneath keeps running.
+    let cmd = format!("tmux attach-session -t {}", tmux_escape(session_name));
+    let status = Command::new("tmux")
+        .args([
+            "display-popup",
+            "-E",
+            "-w",
+            "80%",
+            "-h",
+            "80%",
+            &cmd,
+        ])
+        .status()?;
+    if !status.success() {
+        bail!("tmux display-popup failed");
+    }
+    Ok(())
+}
+
+/// Escape a value for use as a literal in a shell command string. Single-quote
+/// wrapping with embedded quotes escaped, so session names are safe in the popup
+/// command.
+fn tmux_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// Attach to a specific window of a session (selects it first).
 pub fn attach_session_window(session_name: &str, window_idx: usize) -> Result<()> {
     let _ = Command::new("tmux")
@@ -3081,5 +3115,11 @@ Some transcript output.\n\
         assert!(!config_has_top_level_notify("model=\"m\"\n"));
         // A similarly-named key must not false-positive.
         assert!(!config_has_top_level_notify("notification = true\n"));
+    }
+
+    #[test]
+    fn tmux_escape_wraps_and_escapes_single_quotes() {
+        assert_eq!(tmux_escape("my_session"), "'my_session'");
+        assert_eq!(tmux_escape("a'b"), "'a'\\''b'");
     }
 }
