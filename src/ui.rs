@@ -118,6 +118,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         .split(list_area);
         draw_list(f, app, md[0]);
         draw_detail(f, app, md[1]);
+        // Terminals too narrow to host the inline chat input fall back to the
+        // floating modal so SendMessage always has a visible field.
+        if app.input_mode == InputMode::SendMessage && md[1].width < 24 {
+            draw_floating_input(f, app, list_area);
+        }
     }
 
     draw_help(f, app, chunks[3]);
@@ -130,7 +135,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_context_menu(f, app, list_area);
     }
 
-    if is_text_input_mode(app.input_mode) {
+    // SendMessage renders inline as the chat input at the bottom of the detail
+    // pane, so it's excluded from the floating modal (still pasted as text).
+    if is_text_input_mode(app.input_mode) && app.input_mode != InputMode::SendMessage {
         draw_floating_input(f, app, list_area);
     }
 
@@ -1460,56 +1467,78 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let dl = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(2),
-        Constraint::Min(2),
+        Constraint::Length(1), // header
+        Constraint::Min(1),    // body (output or diff)
+        Constraint::Length(1), // chat input
     ])
     .split(area);
 
     f.render_widget(Paragraph::new(Line::from(header)), dl[0]);
 
+    // The body shows the focused section (output or diff — Tab toggles, and
+    // PageUp/PageDown scroll it). The chat input line sits below it, so the
+    // detail pane works as a single view for any agent: type, send, watch the
+    // reply stream in the output section without ever attaching.
     let focus = app.detail_focus.get();
-    let output_focused = focus == app::DetailFocus::Output;
-    let output_text = detail
-        .and_then(|d| d.output.as_deref())
-        .unwrap_or("(no output yet)");
-    let output_block = detail_block(" output ", output_focused);
-    let output = Paragraph::new(output_text)
-        .block(output_block)
-        .scroll((app.detail_output_scroll.get(), 0))
-        .wrap(Wrap { trim: false });
-    f.render_widget(output, dl[1]);
-
-    let diff_focused = focus == app::DetailFocus::Diff;
-    let diff_text = detail
-        .and_then(|d| d.diff.as_deref())
-        .unwrap_or("(no diff)");
-    let diff_block = detail_block(" diff ", diff_focused);
-    let diff = Paragraph::new(diff_text)
-        .block(diff_block)
-        .scroll((app.detail_diff_scroll.get(), 0))
-        .wrap(Wrap { trim: false });
-    f.render_widget(diff, dl[2]);
-}
-
-/// Top-bordered block for a detail-pane section. The focused section gets a
-/// brighter border + bold title so the user knows which one PageUp/Down scrolls.
-fn detail_block(title: &str, focused: bool) -> Block<'_> {
-    let (border, title_style) = if focused {
-        (
-            current().accent,
+    let (body_text, scroll, title) = match focus {
+        app::DetailFocus::Output => (
+            detail
+                .and_then(|d| d.output.as_deref())
+                .unwrap_or("(no output yet)"),
+            app.detail_output_scroll.get(),
+            " output ",
+        ),
+        app::DetailFocus::Diff => (
+            detail.and_then(|d| d.diff.as_deref()).unwrap_or("(no diff)"),
+            app.detail_diff_scroll.get(),
+            " diff ",
+        ),
+    };
+    let body_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(current().accent))
+        .title(title)
+        .title_style(
             Style::default()
                 .fg(current().accent)
                 .add_modifier(Modifier::BOLD),
-        )
+        );
+    let body = Paragraph::new(body_text)
+        .block(body_block)
+        .scroll((scroll, 0))
+        .wrap(Wrap { trim: false });
+    f.render_widget(body, dl[1]);
+
+    draw_chat_input(f, app, dl[2]);
+}
+
+/// The persistent chat input line at the bottom of the detail pane. Inactive it
+/// shows the key hint; in `SendMessage` mode it's the live input (cursor + text)
+/// and Enter sends to the selected agent.
+fn draw_chat_input(f: &mut Frame, app: &App, area: Rect) {
+    let line = if app.input_mode == InputMode::SendMessage {
+        let last = app.input_buffer.rsplit('\n').next().unwrap_or("");
+        Line::from(vec![
+            Span::styled(
+                "> ",
+                Style::default()
+                    .fg(current().accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                last.to_string(),
+                Style::default().fg(current().white),
+            ),
+            Span::styled("▌", Style::default().fg(current().accent)),
+        ])
     } else {
-        (current().border, Style::default().fg(current().muted))
+        let key = key_display(app.keybindings.send_message);
+        Line::from(Span::styled(
+            format!("{key}: message to agent · Tab: output/diff"),
+            Style::default().fg(current().muted),
+        ))
     };
-    Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(border))
-        .title(title)
-        .title_style(title_style)
+    f.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_context_menu(f: &mut Frame, app: &App, area: Rect) {

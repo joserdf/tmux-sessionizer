@@ -113,6 +113,9 @@ fn kb_cycle_theme() -> char {
 fn kb_resources() -> char {
     'h'
 }
+fn kb_send_message() -> char {
+    'm'
+}
 
 fn is_false(b: &bool) -> bool {
     !*b
@@ -256,6 +259,9 @@ pub struct KeyBindings {
     /// Toggle the per-session resource (CPU/mem/GPU) panel (default: h)
     #[serde(default = "kb_resources")]
     pub resources: char,
+    /// Send a message to the selected session (default: m)
+    #[serde(default = "kb_send_message")]
+    pub send_message: char,
     /// Context menu action keybindings
     #[serde(default)]
     pub context_menu_keys: ContextMenuKeyBindings,
@@ -274,6 +280,7 @@ impl Default for KeyBindings {
             search: kb_search(),
             cycle_theme: kb_cycle_theme(),
             resources: kb_resources(),
+            send_message: kb_send_message(),
             context_menu_keys: ContextMenuKeyBindings::default(),
         }
     }
