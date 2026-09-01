@@ -809,36 +809,95 @@ pub fn attach_session(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Show a session's live terminal in a `tmux display-popup` overlay over the
-/// current pane — the agent's own window, visible without being redirected to
-/// it. The popup closes (and this returns) when the user detaches (Ctrl-b d) or
-/// presses Esc, returning control to the TUI. Only meaningful when the TUI
-/// itself runs inside a tmux client.
-pub fn popup_session(session_name: &str) -> Result<()> {
-    // `-E` closes the popup when the attached session is detached. The popup
-    // hosts a nested `attach-session` so the user sees the live agent pane and
-    // can interact with it, but the base TUI pane underneath keeps running.
-    let cmd = format!("tmux attach-session -t {}", tmux_escape(session_name));
-    let status = Command::new("tmux")
+/// Whether the TUI is running inside a tmux client. Live master-detail (the
+/// agent's real terminal as the right pane) only works in this case.
+pub fn in_tmux() -> bool {
+    std::env::var_os("TMUX").is_some()
+}
+
+/// Set up the live master-detail layout: split the current window horizontally
+/// so the TUI (left) and a live agent pane (right) sit side by side. Returns
+/// the new (right) pane id, or `None` when the window already has more than one
+/// pane (existing layouts are left untouched) or tmux isn't available.
+pub fn setup_live_pane() -> Option<String> {
+    // Only split single-pane windows so we never disturb a user's layout.
+    let count = Command::new("tmux")
+        .args(["display-message", "-p", "#{window_panes}"])
+        .output()
+        .ok()?;
+    if String::from_utf8_lossy(&count.stdout).trim() != "1" {
+        return None;
+    }
+    // `-p 60`: the new (right) pane gets 60%, the TUI keeps 40% on the left.
+    let out = Command::new("tmux")
         .args([
-            "display-popup",
-            "-E",
-            "-w",
-            "80%",
+            "split-window",
             "-h",
-            "80%",
-            &cmd,
+            "-p",
+            "60",
+            "-P",
+            "-F",
+            "#{pane_id}",
         ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let pane_id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if pane_id.is_empty() {
+        None
+    } else {
+        Some(pane_id)
+    }
+}
+
+/// Point the live pane at a session: respawn it to attach to the session's real
+/// terminal. On detach the command drops back to a shell so the pane survives
+/// for the next selection (a bare attach would exit and collapse the layout).
+/// The command the live pane runs to attach to a session's real terminal,
+/// falling back to a shell on detach so the pane survives for the next
+/// selection.
+fn live_pane_cmd(session_name: &str) -> String {
+    format!(
+        "tmux attach-session -t {}; exec \"$SHELL\"",
+        tmux_escape(session_name)
+    )
+}
+
+pub fn set_live_pane(pane_id: &str, session_name: &str) -> Result<()> {
+    let cmd = live_pane_cmd(session_name);
+    let status = Command::new("tmux")
+        .args(["respawn-pane", "-k", "-t", pane_id, &cmd])
         .status()?;
     if !status.success() {
-        bail!("tmux display-popup failed");
+        bail!("tmux respawn-pane failed");
     }
     Ok(())
 }
 
+/// Move the tmux cursor into the live pane so the user can interact with the
+/// agent directly. From there they detach (prefix + d) to return to the pane's
+/// shell, then use the outer prefix + arrow to get back to the sidebar.
+pub fn focus_pane(pane_id: &str) -> Result<()> {
+    let status = Command::new("tmux")
+        .args(["select-pane", "-t", pane_id])
+        .status()?;
+    if !status.success() {
+        bail!("tmux select-pane failed");
+    }
+    Ok(())
+}
+
+/// Best-effort close of the live pane (used when the TUI quits, so the window
+/// collapses back to a single pane).
+pub fn kill_pane(pane_id: &str) {
+    let _ = Command::new("tmux").args(["kill-pane", "-t", pane_id]).status();
+}
+
 /// Escape a value for use as a literal in a shell command string. Single-quote
-/// wrapping with embedded quotes escaped, so session names are safe in the popup
-/// command.
+/// wrapping with embedded quotes escaped, so session names are safe in the
+/// respawn command.
 fn tmux_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -3121,5 +3180,18 @@ Some transcript output.\n\
     fn tmux_escape_wraps_and_escapes_single_quotes() {
         assert_eq!(tmux_escape("my_session"), "'my_session'");
         assert_eq!(tmux_escape("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn live_pane_cmd_attaches_and_keeps_a_shell_after_detach() {
+        assert_eq!(
+            live_pane_cmd("web"),
+            "tmux attach-session -t 'web'; exec \"$SHELL\""
+        );
+        // A session name with a quote is escaped inside the command.
+        assert_eq!(
+            live_pane_cmd("a'b"),
+            "tmux attach-session -t 'a'\\''b'; exec \"$SHELL\""
+        );
     }
 }

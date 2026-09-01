@@ -409,10 +409,14 @@ pub struct App {
     pub should_attach: Option<String>,
     /// Attach to a specific (session, window index) — used for terminals.
     pub should_attach_window: Option<(String, usize)>,
-    /// Show a selected session's live terminal in a tmux `display-popup` overlay
-    /// (without attaching/redirecting). The TUI is suspended while it's open,
-    /// then resumes when the popup closes.
-    pub should_popup: Option<String>,
+    /// Id of the live agent pane (the right pane of the master-detail split the
+    /// TUI sets up when running inside tmux). `Some` means live mode is active.
+    pub live_pane: Option<String>,
+    /// Show a session's real terminal in the live pane (set by Enter / Right).
+    pub should_show_live: Option<String>,
+    /// Focus the tmux cursor into the live pane so the user can interact with
+    /// the agent directly (set by Tab / "Focus agent pane").
+    pub should_focus_live: bool,
     /// Pending foreground hunk review: `(cwd, hunk args, candidate sessions)`.
     /// Set by the review action when the configured tool is `hunk`; the main loop
     /// suspends the TUI, runs hunk on the real terminal, then resumes. Unlike
@@ -731,7 +735,9 @@ impl App {
             should_quit: false,
             should_attach: None,
             should_attach_window: None,
-            should_popup: None,
+            live_pane: None,
+            should_show_live: None,
+            should_focus_live: false,
             should_review_hunk: None,
             pending_project_path: None,
             pending_task_name: None,
@@ -1277,12 +1283,25 @@ impl App {
         }
     }
 
+    /// Whether the TUI is in live mode: running inside tmux with the agent's
+    /// real terminal shown in a right-hand pane (rather than a rendered detail
+    /// pane).
+    pub fn live_mode(&self) -> bool {
+        self.live_pane.is_some()
+    }
+
     pub fn enter_selected(&mut self) {
         match self.selected_item() {
-            // Enter on a session attaches to it.
+            // Enter on a session attaches to it — except in live mode, where
+            // the agent's terminal already sits in the right pane, so Enter
+            // just points the live pane at the selected session.
             Some(ListItem::Session { session, .. })
             | Some(ListItem::AdhocSession { session, .. }) => {
-                self.should_attach = Some(session.name.clone());
+                if self.live_mode() {
+                    self.should_show_live = Some(session.name.clone());
+                } else {
+                    self.should_attach = Some(session.name.clone());
+                }
             }
             // Enter on a collapsible item (project/task/adhoc group) toggles it.
             _ => self.toggle_collapse(),
@@ -1498,7 +1517,7 @@ impl App {
                     },
                     ContextMenuItem {
                         key: cm.view_live,
-                        label: "View live (popup)",
+                        label: "Focus agent pane",
                         action: ContextAction::ViewLive,
                     },
                 ]);
@@ -2201,14 +2220,16 @@ impl App {
         self.input_cursor = insert_at(&mut self.input_buffer, self.input_cursor, c);
     }
 
-    /// Show the selected session's live terminal in a tmux popup (no redirect).
-    /// The main loop suspends the TUI while the popup is open.
+    /// Focus the live agent pane so the user can interact with the agent
+    /// directly. Only meaningful in live mode (running inside tmux with the
+    /// right-hand pane set up).
     pub fn start_view_live(&mut self) {
-        let Some(name) = self.selected_session_name() else {
-            self.status_message = Some("Select a session to view".into());
+        if self.live_pane.is_none() {
+            self.status_message =
+                Some("Live agent pane requires running inside tmux".into());
             return;
-        };
-        self.should_popup = Some(name);
+        }
+        self.should_focus_live = true;
     }
 
     /// Approve the selected session's pending permission prompt (sends "y").

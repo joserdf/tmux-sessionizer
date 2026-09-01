@@ -45,6 +45,11 @@ pub fn run() -> Result<()> {
 
     let mut app = App::new()?;
 
+    // Inside tmux, set up the live master-detail split (sidebar left, the
+    // selected agent's real terminal right). Outside tmux the rendered
+    // full-screen master-detail is the fallback.
+    app.live_pane = tmux::setup_live_pane();
+
     loop {
         enable_raw_mode()?;
         io::stdout().execute(EnterAlternateScreen)?;
@@ -66,16 +71,17 @@ pub fn run() -> Result<()> {
             tmux::attach_session(&session_name)?;
         } else if let Some((session_name, window_idx)) = app.should_attach_window.take() {
             tmux::attach_session_window(&session_name, window_idx)?;
-        } else if let Some(session_name) = app.should_popup.take() {
-            // Live view: show the agent's window in a tmux popup overlay and
-            // resume the TUI when it closes (no redirect).
-            tmux::popup_session(&session_name)?;
         } else if let Some((cwd, args, candidates)) = app.should_review_hunk.take() {
             // hunk is a terminal TUI: run it on the real terminal (the TUI is
             // suspended here), polling its live session so comments can be
             // routed to a session on exit.
             app.run_hunk_review(cwd, args, candidates);
         }
+    }
+
+    // Collapse the master-detail split back to a single pane on exit.
+    if let Some(pane) = &app.live_pane {
+        tmux::kill_pane(pane);
     }
 
     Ok(())
@@ -157,13 +163,23 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         KeyCode::Char(c) if c == kb.send_message => app.start_send_message(),
                         KeyCode::Char(c) if c == kb.view_live => app.start_view_live(),
                         // Master-detail pane: PageUp/PageDown scroll the focused
-                        // section (output or diff); Tab toggles the focus.
+                        // section (output or diff); Tab toggles the focus — or,
+                        // in live mode, jumps the cursor into the agent pane.
                         KeyCode::PageDown => app.detail_scroll_down(),
                         KeyCode::PageUp => app.detail_scroll_up(),
-                        KeyCode::Tab => app.toggle_detail_focus(),
-                        // Right on a session enters its chat (focus the detail
-                        // pane's input for the selected agent).
+                        KeyCode::Tab => {
+                            if app.live_mode() {
+                                app.should_focus_live = true;
+                            } else {
+                                app.toggle_detail_focus();
+                            }
+                        }
+                        // Right on a session shows it in the live pane (when in
+                        // live mode) and opens its chat (focus the composer).
                         KeyCode::Right if app.selected_session_name().is_some() => {
+                            if app.live_mode() {
+                                app.should_show_live = app.selected_session_name();
+                            }
                             app.start_send_message()
                         }
                         _ => {}
@@ -476,10 +492,21 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         // suspend the TUI so the main loop can run it.
         if app.should_attach.is_some()
             || app.should_attach_window.is_some()
-            || app.should_popup.is_some()
             || app.should_review_hunk.is_some()
         {
             return Ok(());
+        }
+
+        // Live-mode actions don't suspend the TUI: repoint the right-hand pane
+        // at a session, or hand focus over to it.
+        if let (Some(pane), Some(name)) = (app.live_pane.clone(), app.should_show_live.take()) {
+            tmux::set_live_pane(&pane, &name)?;
+        }
+        if app.should_focus_live {
+            app.should_focus_live = false;
+            if let Some(pane) = app.live_pane.clone() {
+                tmux::focus_pane(&pane)?;
+            }
         }
 
         // Apply background updates (non-blocking)

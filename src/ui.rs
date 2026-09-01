@@ -108,7 +108,14 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Master-detail view: the project/task/session tree is the sidebar (master);
     // the selected session's output + diff render in the detail pane. With no
     // projects there is nothing to detail, so the empty state spans full width.
-    if app.config.projects.is_empty() {
+    if app.live_mode() {
+        // Live mode: the TUI occupies only the left pane of a tmux split; the
+        // right pane is the agent's real terminal. Draw the sidebar full width
+        // with the chat composer as a strip at the bottom.
+        let md = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(list_area);
+        draw_list(f, app, md[0]);
+        draw_chat_input(f, app, md[1]);
+    } else if app.config.projects.is_empty() {
         draw_empty_state(f, app, list_area);
     } else {
         let md = Layout::horizontal([
@@ -1532,6 +1539,13 @@ fn draw_chat_input(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("▌", Style::default().fg(current().accent)),
             Span::styled(buf[cur..].to_string(), Style::default().fg(current().white)),
         ])
+    } else if app.live_mode() {
+        let msg_key = key_display(app.keybindings.send_message);
+        let view_key = key_display(app.keybindings.view_live);
+        Line::from(Span::styled(
+            format!("→ {msg_key} chat · {view_key}: focus agent · Tab: enter agent"),
+            Style::default().fg(current().muted),
+        ))
     } else {
         let msg_key = key_display(app.keybindings.send_message);
         let view_key = key_display(app.keybindings.view_live);
