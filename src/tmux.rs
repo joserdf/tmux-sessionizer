@@ -852,26 +852,30 @@ pub fn setup_live_pane() -> Option<String> {
     }
 }
 
-/// Point the live pane at a session: respawn it to attach to the session's real
-/// terminal. On detach the command drops back to a shell so the pane survives
-/// for the next selection (a bare attach would exit and collapse the layout).
-/// The command the live pane runs to attach to a session's real terminal,
-/// falling back to a shell on detach so the pane survives for the next
-/// selection.
-fn live_pane_cmd(session_name: &str) -> String {
-    format!(
-        "tmux attach-session -t {}; exec \"$SHELL\"",
-        tmux_escape(session_name)
-    )
+/// Get the active pane ID of a given session.
+pub fn get_session_active_pane(session_name: &str) -> Result<String> {
+    let out = Command::new("tmux")
+        .args(["display-message", "-p", "-t", session_name, "#{pane_id}"])
+        .output()?;
+    if !out.status.success() {
+        bail!("Failed to get active pane for session '{session_name}'");
+    }
+    let pane_id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if pane_id.is_empty() {
+        bail!("Empty pane ID for session '{session_name}'");
+    }
+    Ok(pane_id)
 }
 
-pub fn set_live_pane(pane_id: &str, session_name: &str) -> Result<()> {
-    let cmd = live_pane_cmd(session_name);
+/// Swap two panes natively using `tmux swap-pane -s src -t dst`. This moves the
+/// real agent pane into the TUI window's right slot without creating a nested
+/// client or showing nesting warnings.
+pub fn swap_panes(src_pane: &str, dst_pane: &str) -> Result<()> {
     let status = Command::new("tmux")
-        .args(["respawn-pane", "-k", "-t", pane_id, &cmd])
+        .args(["swap-pane", "-s", src_pane, "-t", dst_pane])
         .status()?;
     if !status.success() {
-        bail!("tmux respawn-pane failed");
+        bail!("tmux swap-pane failed between {src_pane} and {dst_pane}");
     }
     Ok(())
 }
@@ -893,13 +897,6 @@ pub fn focus_pane(pane_id: &str) -> Result<()> {
 /// collapses back to a single pane).
 pub fn kill_pane(pane_id: &str) {
     let _ = Command::new("tmux").args(["kill-pane", "-t", pane_id]).status();
-}
-
-/// Escape a value for use as a literal in a shell command string. Single-quote
-/// wrapping with embedded quotes escaped, so session names are safe in the
-/// respawn command.
-fn tmux_escape(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Attach to a specific window of a session (selects it first).
@@ -3176,22 +3173,4 @@ Some transcript output.\n\
         assert!(!config_has_top_level_notify("notification = true\n"));
     }
 
-    #[test]
-    fn tmux_escape_wraps_and_escapes_single_quotes() {
-        assert_eq!(tmux_escape("my_session"), "'my_session'");
-        assert_eq!(tmux_escape("a'b"), "'a'\\''b'");
-    }
-
-    #[test]
-    fn live_pane_cmd_attaches_and_keeps_a_shell_after_detach() {
-        assert_eq!(
-            live_pane_cmd("web"),
-            "tmux attach-session -t 'web'; exec \"$SHELL\""
-        );
-        // A session name with a quote is escaped inside the command.
-        assert_eq!(
-            live_pane_cmd("a'b"),
-            "tmux attach-session -t 'a'\\''b'; exec \"$SHELL\""
-        );
-    }
 }

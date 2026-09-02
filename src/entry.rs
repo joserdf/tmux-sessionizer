@@ -79,7 +79,11 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // Collapse the master-detail split back to a single pane on exit.
+    // Collapse the master-detail split back to a single pane on exit: first
+    // swap any shown agent pane back to its session, then kill the placeholder.
+    if app.live_mode() {
+        app.restore_live_pane();
+    }
     if let Some(pane) = &app.live_pane {
         tmux::kill_pane(pane);
     }
@@ -498,13 +502,13 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         }
 
         // Live-mode actions don't suspend the TUI: repoint the right-hand pane
-        // at a session, or hand focus over to it.
-        if let (Some(pane), Some(name)) = (app.live_pane.clone(), app.should_show_live.take()) {
-            tmux::set_live_pane(&pane, &name)?;
+        // at a session (via swap-pane), or hand focus over to it.
+        if let Some(name) = app.should_show_live.take() {
+            app.show_live_session(&name);
         }
         if app.should_focus_live {
             app.should_focus_live = false;
-            if let Some(pane) = app.live_pane.clone() {
+            if let Some(pane) = app.live_showing_pane.clone().or_else(|| app.live_pane.clone()) {
                 tmux::focus_pane(&pane)?;
             }
         }

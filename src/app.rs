@@ -409,9 +409,13 @@ pub struct App {
     pub should_attach: Option<String>,
     /// Attach to a specific (session, window index) — used for terminals.
     pub should_attach_window: Option<(String, usize)>,
-    /// Id of the live agent pane (the right pane of the master-detail split the
-    /// TUI sets up when running inside tmux). `Some` means live mode is active.
+    /// Id of the placeholder pane created on launch in the right slot.
+    /// `Some` means live mode is active.
     pub live_pane: Option<String>,
+    /// Session name whose real pane is currently swapped into the right slot.
+    pub live_showing: Option<String>,
+    /// Agent pane ID currently sitting in our right slot.
+    pub live_showing_pane: Option<String>,
     /// Show a session's real terminal in the live pane (set by Enter / Right).
     pub should_show_live: Option<String>,
     /// Focus the tmux cursor into the live pane so the user can interact with
@@ -736,6 +740,8 @@ impl App {
             should_attach: None,
             should_attach_window: None,
             live_pane: None,
+            live_showing: None,
+            live_showing_pane: None,
             should_show_live: None,
             should_focus_live: false,
             should_review_hunk: None,
@@ -1288,6 +1294,39 @@ impl App {
     /// pane).
     pub fn live_mode(&self) -> bool {
         self.live_pane.is_some()
+    }
+
+    /// Restore any currently displayed agent pane back to its original session,
+    /// bringing our placeholder pane back to the right slot.
+    pub fn restore_live_pane(&mut self) {
+        if let (Some(shown_pane), Some(placeholder)) =
+            (self.live_showing_pane.take(), &self.live_pane)
+        {
+            let _ = crate::tmux::swap_panes(&shown_pane, placeholder);
+            self.live_showing = None;
+        }
+    }
+
+    /// Display `session_name` in the live right slot via `swap-pane`. Non-nested
+    /// and warning-free because it physically moves the agent's pane.
+    pub fn show_live_session(&mut self, session_name: &str) {
+        if self.live_showing.as_deref() == Some(session_name) {
+            return;
+        }
+        let Some(placeholder) = self.live_pane.clone() else {
+            return;
+        };
+
+        // 1. Restore previous shown pane back to its session if any
+        self.restore_live_pane();
+
+        // 2. Fetch target session's active pane and swap it with our placeholder
+        if let Ok(target_pane) = crate::tmux::get_session_active_pane(session_name)
+            && crate::tmux::swap_panes(&placeholder, &target_pane).is_ok()
+        {
+            self.live_showing = Some(session_name.to_string());
+            self.live_showing_pane = Some(target_pane);
+        }
     }
 
     pub fn enter_selected(&mut self) {

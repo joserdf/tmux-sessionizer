@@ -1543,7 +1543,7 @@ fn draw_chat_input(f: &mut Frame, app: &App, area: Rect) {
         let msg_key = key_display(app.keybindings.send_message);
         let view_key = key_display(app.keybindings.view_live);
         Line::from(Span::styled(
-            format!("→ {msg_key} chat · {view_key}: focus agent · Tab: enter agent"),
+            format!("→ {msg_key} chat · {view_key}/Tab: enter agent pane · Ctrl-b ← back"),
             Style::default().fg(current().muted),
         ))
     } else {
