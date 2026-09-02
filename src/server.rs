@@ -84,6 +84,32 @@ pub fn run(bind: &str) -> Result<()> {
         .nest_service("/mcp", mcp_service)
         .layer(middleware::from_fn_with_state(state.clone(), require_bearer));
 
+    // Every route that changes state — drives a session, creates or deletes a
+    // task, feeds the hook inbox or the message queue, or moves a board — lives
+    // here, behind `require_local`. This sub-router is the single policy
+    // point: a route added outside it is reachable by anyone who can reach the
+    // bind address. `scripts/daemon.sh` binds loopback, and the documented
+    // remote path (`tailscale serve`) proxies in from loopback, so both keep
+    // working. `/mcp` has its own bearer token instead.
+    let mutating = Router::new()
+        .route("/api/sessions/{name}/send", post(api_send))
+        .route("/api/sessions/{name}/review", post(api_review))
+        .route("/api/sessions/{name}/keys", post(api_keys))
+        .route("/api/sessions/{name}/kill", post(api_kill))
+        .route("/api/projects", post(api_create_project))
+        .route("/api/tasks", post(api_create_task))
+        .route("/api/tasks/delete", post(api_delete_task))
+        .route("/api/sessions", post(api_create_session))
+        .route("/api/adhoc", post(api_create_adhoc))
+        .route("/api/hook", post(api_hook))
+        .route("/api/v2/sessions/{name}/category", post(api_set_category))
+        // GET too: one path can't be split across the two routers.
+        .route("/api/v2/queue", get(api_queue_get).post(api_queue_push))
+        .route("/api/v2/boards/{name}/cards/move", post(api_board_move))
+        .route("/api/v2/boards/dispatch", post(api_board_dispatch))
+        .route("/api/v2/boards/pause", post(api_board_pause))
+        .layer(axum::middleware::from_fn(require_local));
+
     let app = Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
@@ -95,27 +121,13 @@ pub fn run(bind: &str) -> Result<()> {
         .route("/events/worker", get(api_events_worker))
         .route("/api/sessions/{name}/output", get(api_output))
         .route("/api/diff", get(api_diff))
-        .route("/api/sessions/{name}/send", post(api_send))
-        .route("/api/sessions/{name}/review", post(api_review))
-        .route("/api/sessions/{name}/keys", post(api_keys))
-        .route("/api/sessions/{name}/kill", post(api_kill))
-        .route("/api/projects", post(api_create_project))
-        .route("/api/tasks", post(api_create_task))
-        .route("/api/tasks/delete", post(api_delete_task))
-        .route("/api/sessions", post(api_create_session))
-        .route("/api/adhoc", post(api_create_adhoc))
-        .route("/api/hook", post(api_hook))
         .route("/api/hook-events", get(api_hook_events))
-        .route("/api/v2/sessions/{name}/category", post(api_set_category))
         .route("/api/v2/pane-states", get(api_pane_states))
-        .route("/api/v2/queue", get(api_queue_get).post(api_queue_push))
         .route("/api/v2/boards", get(api_boards))
-        .route("/api/v2/boards/{name}/cards/move", post(api_board_move))
-        .route("/api/v2/boards/dispatch", post(api_board_dispatch))
-        .route("/api/v2/boards/pause", post(api_board_pause))
         .route("/board", get(board_page))
         .route("/board.js", get(board_js))
         .route("/board.css", get(board_css))
+        .merge(mutating)
         .merge(mcp_router)
         .with_state(state);
 
@@ -159,8 +171,8 @@ pub fn run(bind: &str) -> Result<()> {
         });
 
         // `into_make_service_with_connect_info` makes the TCP peer address
-        // available to handlers as `ConnectInfo`; `api_hook` uses it to reject
-        // non-loopback sources (hooks are only ever posted locally).
+        // available as `ConnectInfo`; `require_local` uses it to reject
+        // non-loopback sources on every mutating route.
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -507,26 +519,44 @@ mod review_tests {
 mod hook_tests {
     use super::*;
 
-    /// Local loopback (IPv4 `127/8` and IPv6 `::1`) is the only allowed hook
-    /// source.
+    /// Local loopback (IPv4 `127/8` and IPv6 `::1`) is the only allowed source
+    /// for a mutating route.
     #[test]
-    fn hook_source_allows_loopback_v4_and_v6() {
-        assert!(hook_source_allowed(std::net::SocketAddr::from(([127, 0, 0, 1], 55555))));
-        assert!(hook_source_allowed(std::net::SocketAddr::from(([127, 0, 0, 8], 1))));
+    fn local_source_allows_loopback_v4_and_v6() {
+        assert!(local_source_allowed(std::net::SocketAddr::from(([127, 0, 0, 1], 55555))));
+        assert!(local_source_allowed(std::net::SocketAddr::from(([127, 0, 0, 8], 1))));
         // ::1 as [u8; 8]
-        assert!(hook_source_allowed(std::net::SocketAddr::from((
+        assert!(local_source_allowed(std::net::SocketAddr::from((
             [0, 0, 0, 0, 0, 0, 0, 1],
             2
         ))));
     }
 
+    /// A dual-stack listener (`--bind [::]:7878`) reports an IPv4 peer as the
+    /// IPv4-mapped `::ffff:127.0.0.1`, for which `Ipv6Addr::is_loopback` is
+    /// false. Local hooks curl `127.0.0.1`, so rejecting that form silently
+    /// breaks agent status reporting on any `[::]` bind.
+    #[test]
+    fn local_source_allows_ipv4_mapped_loopback() {
+        let peer = std::net::SocketAddr::new("::ffff:127.0.0.1".parse().unwrap(), 7878);
+        assert!(local_source_allowed(peer));
+    }
+
+    /// The mapped form must not become a bypass: a mapped LAN address is still
+    /// a LAN address.
+    #[test]
+    fn local_source_rejects_ipv4_mapped_non_loopback() {
+        let peer = std::net::SocketAddr::new("::ffff:10.0.0.1".parse().unwrap(), 7878);
+        assert!(!local_source_allowed(peer));
+    }
+
     /// Anything else — LAN, private, CGNAT/tailnet, public — is rejected.
     #[test]
-    fn hook_source_rejects_non_loopback() {
-        assert!(!hook_source_allowed(std::net::SocketAddr::from(([10, 0, 0, 1], 55555))));
-        assert!(!hook_source_allowed(std::net::SocketAddr::from(([192, 168, 1, 5], 1))));
-        assert!(!hook_source_allowed(std::net::SocketAddr::from(([100, 64, 0, 1], 1))));
-        assert!(!hook_source_allowed(std::net::SocketAddr::from(([8, 8, 8, 8], 1))));
+    fn local_source_rejects_non_loopback() {
+        assert!(!local_source_allowed(std::net::SocketAddr::from(([10, 0, 0, 1], 55555))));
+        assert!(!local_source_allowed(std::net::SocketAddr::from(([192, 168, 1, 5], 1))));
+        assert!(!local_source_allowed(std::net::SocketAddr::from(([100, 64, 0, 1], 1))));
+        assert!(!local_source_allowed(std::net::SocketAddr::from(([8, 8, 8, 8], 1))));
     }
 }
 
@@ -652,7 +682,7 @@ fn validate_review_comments(comments: &[crate::review::ReviewComment]) -> Result
 }
 
 /// Forward review comments to an agent session as a single prompt, formatted
-/// like the TUI's hunk/difit flow. Same access as `api_send`, which it wraps.
+/// like the TUI's hunk/difit flow. Local-only (`require_local`), like `api_send`.
 async fn api_review(
     Path(name): Path<String>,
     axum::Json(body): axum::Json<ReviewBody>,
@@ -736,18 +766,11 @@ struct QueueBody {
 }
 
 /// Queue a message for a working agent; the worker delivers it when the pane
-/// is next idle or done. Local-only, like `POST /api/hook`.
+/// is next idle or done. Local-only (`require_local`).
 async fn api_queue_push(
     State(state): State<Arc<ServerState>>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     axum::Json(body): axum::Json<QueueBody>,
 ) -> Result<axum::Json<Value>, ApiError> {
-    if !hook_source_allowed(peer) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "queue is local-only; messages can only be queued from this machine".to_string(),
-        ));
-    }
     if body.pane.trim().is_empty() {
         return Err(bad_request("pane is required"));
     }
@@ -804,18 +827,11 @@ struct MoveCardBody {
     column: String,
 }
 
-/// Move one card to another column on a board. Local-only.
+/// Move one card to another column on a board. Local-only (`require_local`).
 async fn api_board_move(
     Path(name): Path<String>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     axum::Json(body): axum::Json<MoveCardBody>,
 ) -> Result<StatusCode, ApiError> {
-    if !hook_source_allowed(peer) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "board moves are local-only".to_string(),
-        ));
-    }
     let column = crate::tasks::parse_column(&body.column)
         .map_err(|_| bad_request(format!("unknown column '{}'", body.column)))?;
 
@@ -849,17 +865,10 @@ struct DispatchBody {
     dry_run: bool,
 }
 
-/// Run one dispatch pass. Local-only.
+/// Run one dispatch pass. Local-only (`require_local`).
 async fn api_board_dispatch(
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     axum::Json(body): axum::Json<DispatchBody>,
 ) -> Result<axum::Json<Value>, ApiError> {
-    if !hook_source_allowed(peer) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "dispatch is local-only".to_string(),
-        ));
-    }
     let summary = tokio::task::spawn_blocking(move || {
         let s = crate::tasks::dispatch::dispatch_once(body.dry_run).map_err(internal)?;
         Ok::<_, ApiError>(crate::tasks::web::dispatch_summary_json(&s))
@@ -874,17 +883,10 @@ struct PauseBody {
     paused: bool,
 }
 
-/// Pause or resume the dispatcher. Local-only.
+/// Pause or resume the dispatcher. Local-only (`require_local`).
 async fn api_board_pause(
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     axum::Json(body): axum::Json<PauseBody>,
 ) -> Result<StatusCode, ApiError> {
-    if !hook_source_allowed(peer) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "pause is local-only".to_string(),
-        ));
-    }
     tokio::task::spawn_blocking(move || crate::tasks::dispatch::set_paused(body.paused))
         .await
         .map_err(internal)?
@@ -914,13 +916,34 @@ async fn api_set_category(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The single policy point deciding whether a peer may POST `/api/hook`. Hook
-/// ingestion is local-only (agent hooks curl `127.0.0.1`), so this must accept
-/// BOTH the IPv4 (`127.0.0.0/8`) and IPv6 (`::1`) loopback ranges and reject
-/// everything else (LAN / private / public / tailnet) — otherwise an exposed
-/// daemon could be fed forged hook events.
-fn hook_source_allowed(peer: std::net::SocketAddr) -> bool {
-    peer.ip().is_loopback()
+/// The single policy point deciding whether a peer may reach a mutating route.
+/// Mutations are local-only (agent hooks curl `127.0.0.1`; the TUI and the web
+/// UI reach the daemon over loopback, directly or via a `tailscale serve`
+/// proxy), so this must accept BOTH the IPv4 (`127.0.0.0/8`) and IPv6 (`::1`)
+/// loopback ranges and reject everything else (LAN / private / public /
+/// tailnet) — otherwise a daemon bound to a non-loopback address would let any
+/// peer that can reach it drive or kill sessions, or forge hook events.
+///
+/// `to_canonical` first, because a dual-stack listener (`--bind [::]:7878`)
+/// reports an IPv4 peer as the IPv4-mapped `::ffff:127.0.0.1`, and
+/// `Ipv6Addr::is_loopback` is false for that — local hooks curling `127.0.0.1`
+/// would be silently rejected, and agent status would quietly stop updating.
+fn local_source_allowed(peer: std::net::SocketAddr) -> bool {
+    peer.ip().to_canonical().is_loopback()
+}
+
+/// Reject non-loopback peers before they reach a mutating handler. Applied as a
+/// layer over the mutating sub-router in [`run`], so the check cannot be
+/// forgotten on a newly added route there.
+async fn require_local(
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !local_source_allowed(peer) {
+        return (StatusCode::FORBIDDEN, "local requests only").into_response();
+    }
+    next.run(req).await
 }
 
 /// Ingest a normalized agent hook event, POSTed by an agent's hook script.
@@ -928,16 +951,10 @@ fn hook_source_allowed(peer: std::net::SocketAddr) -> bool {
 /// The event is normalized and kept (bounded) for `GET /api/hook-events`.
 async fn api_hook(
     State(state): State<Arc<ServerState>>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     axum::Json(body): axum::Json<Value>,
 ) -> Result<StatusCode, ApiError> {
-    // Hook events are only ever posted by local agent hooks (post-event.sh curls
-    // 127.0.0.1). Reject non-loopback sources so an exposed daemon (e.g. bound to
-    // a tailnet IP) can't be fed forged hook events that manipulate session
-    // status or trigger auto-close.
-    if !hook_source_allowed(peer) {
-        return Ok(StatusCode::FORBIDDEN);
-    }
+    // Non-loopback sources are already rejected by `require_local` on the
+    // mutating sub-router, so a forged hook event cannot reach this handler.
     let agent = body.get("agent").and_then(Value::as_str).unwrap_or("");
     let raw = body.to_string();
     let event = match agent {

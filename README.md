@@ -24,12 +24,15 @@ The old pure-bash session picker is gone; bash is now a thin tmux bootstrap.
 ## Security model
 
 - **Loopback-only mutations.** The daemon binds `127.0.0.1:7878` by default.
-  Every route that changes state — `send`/`keys`/`kill` on a session,
-  `create`/`delete` project/task/session/adhoc, and the agent-hook ingestion
+  Every route that changes state — `send`/`review`/`keys`/`kill` on a session,
+  `create`/`delete` project/task/session/adhoc, session categories, the
+  message queue, board moves/dispatch/pause, and the agent-hook ingestion
   endpoint (`POST /api/hook`) — rejects any peer whose TCP source address is not
   loopback (IPv4 `127/8` or IPv6 `::1`), returning HTTP 403. Read-only
   routes (`/api/state`, `/events`, `/api/sessions/{name}/output`, `/api/diff`,
-  `/api/hook-events`) stay reachable from any peer that can reach the bind address.
+  `/api/hook-events`, `/api/v2/pane-states`, `/api/v2/boards`) stay reachable
+  from any peer that can reach the bind address. `/mcp` is guarded by its
+  bearer token instead (see [Streamable HTTP](#streamable-http-on-the-daemon)).
 - **Remote access path (tailnet).** The documented way to reach the daemon
   remotely is `tailscale serve`, which proxies connections in over loopback. Because of
   that, the daemon trusts loopback as its boundary: a `tailscale serve` proxy
