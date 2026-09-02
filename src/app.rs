@@ -412,6 +412,10 @@ pub struct App {
     /// Id of the placeholder pane created on launch in the right slot.
     /// `Some` means live mode is active.
     pub live_pane: Option<String>,
+    /// Id of the pane the TUI itself runs in (from `$TMUX_PANE`). Re-selecting it
+    /// after a `swap-pane` keeps focus on the sidebar so Enter only *shows* a
+    /// session without stealing focus into the agent pane.
+    pub tui_pane: Option<String>,
     /// Session name whose real pane is currently swapped into the right slot.
     pub live_showing: Option<String>,
     /// Agent pane ID currently sitting in our right slot.
@@ -740,6 +744,7 @@ impl App {
             should_attach: None,
             should_attach_window: None,
             live_pane: None,
+            tui_pane: None,
             live_showing: None,
             live_showing_pane: None,
             should_show_live: None,
@@ -1326,6 +1331,12 @@ impl App {
         {
             self.live_showing = Some(session_name.to_string());
             self.live_showing_pane = Some(target_pane);
+            // swap-pane makes the moved-in agent pane active, stealing focus from
+            // the sidebar. Re-select the TUI pane so Enter/Right only *show* the
+            // session; the user explicitly enters it with Tab / view_live.
+            if let Some(tui) = &self.tui_pane {
+                let _ = crate::tmux::focus_pane(tui);
+            }
         }
     }
 

@@ -2491,11 +2491,13 @@ pub fn delete_task(
         let _ = kill_session(&session.name);
     }
 
-    // Also clean up any orphaned session records (tmux session already dead)
+    // Also clean up any orphaned session records (tmux session already dead).
+    // Session records persist the raw project/task names (see add_session_record),
+    // so compare against the raw inputs, not their sanitized forms.
     let records = crate::config::load_sessions();
     for (tmux_name, record) in &records {
-        if record.project_name == sanitize(project_name)
-            && record.task_name == sanitize(task_name)
+        if record.project_name == project_name
+            && record.task_name == task_name
             && !live_names.contains(tmux_name.as_str())
         {
             // This record's tmux session is dead — clean up its worktree and branch
@@ -2836,6 +2838,35 @@ mod tests {
         let adhoc = adhoc_sessions_for_project("proj", &sessions);
         assert_eq!(adhoc.len(), 1);
         assert_eq!(adhoc[0].session_name, "a");
+    }
+
+    #[test]
+    fn sessions_for_task_matches_sanitized_names_and_orders_main_first() {
+        // Live TmuxSessions carry sanitized project/task names (sanitize keeps
+        // case and maps spaces to hyphens), so a raw project "My Project" maps
+        // to "My-Project".
+        let sessions = vec![
+            TmuxSession::from_tmux_name("cm__My-Project__Fix-Bug__2").unwrap(),
+            TmuxSession::from_tmux_name("cm__My-Project__Fix-Bug__main").unwrap(),
+            TmuxSession::from_tmux_name("cm__My-Project__Other-Task__1").unwrap(),
+            TmuxSession::from_tmux_name("cm__Other-Project__Fix-Bug__1").unwrap(),
+        ];
+        let task_sessions = sessions_for_task("My Project", "Fix Bug", &sessions);
+        assert_eq!(task_sessions.len(), 2);
+        // The main session always sorts first.
+        assert!(is_main_session(&task_sessions[0].session_name));
+        // Only sessions of the exact project+task match.
+        for s in &task_sessions {
+            assert_eq!(s.project_name, "My-Project");
+            assert_eq!(s.task_name, "Fix-Bug");
+        }
+    }
+
+    #[test]
+    fn sessions_for_task_empty_when_no_match() {
+        let sessions = vec![TmuxSession::from_tmux_name("cm__proj__task__1").unwrap()];
+        assert!(sessions_for_task("proj", "missing", &sessions).is_empty());
+        assert!(sessions_for_task("missing", "task", &sessions).is_empty());
     }
 
     // --- shell_escape ---

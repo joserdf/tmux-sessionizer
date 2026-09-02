@@ -48,6 +48,7 @@ pub fn run() -> Result<()> {
     // Inside tmux, set up the live master-detail split (sidebar left, the
     // selected agent's real terminal right). Outside tmux the rendered
     // full-screen master-detail is the fallback.
+    app.tui_pane = std::env::var("TMUX_PANE").ok();
     app.live_pane = tmux::setup_live_pane();
 
     loop {
