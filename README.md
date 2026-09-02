@@ -21,6 +21,32 @@ The old pure-bash session picker is gone; bash is now a thin tmux bootstrap.
 - **Bootstrap** — `sessionizer.tmux` (bash) wires tmux keybindings and the
   daemon lifecycle. That is its entire job.
 
+## Security model
+
+- **Loopback-only mutations.** The daemon binds `127.0.0.1:7878` by default.
+  Every route that changes state — `send`/`keys`/`kill` on a session,
+  `create`/`delete` project/task/session/adhoc, and the agent-hook ingestion
+  endpoint (`POST /api/hook`) — rejects any peer whose TCP source address is not
+  loopback (IPv4 `127/8` or IPv6 `::1`), returning HTTP 403. Read-only
+  routes (`/api/state`, `/events`, `/api/sessions/{name}/output`, `/api/diff`,
+  `/api/hook-events`) stay reachable from any peer that can reach the bind address.
+- **Remote access path (tailnet).** The documented way to reach the daemon
+  remotely is `tailscale serve`, which proxies connections in over loopback. Because of
+  that, the daemon trusts loopback as its boundary: a `tailscale serve` proxy
+  means every tailnet client that can reach the daemon gets full mutation rights.
+  `X-Forwarded-For` is deliberately NOT consulted — tailnet authentication and ACLs
+  are what gate who can reach the daemon in that setup.
+- **Known gap (pane content / diffs).** `GET /api/sessions/{name}/output` and
+  `GET /api/diff` are read-only and NOT behind the loopback guard: any peer that
+  can reach the bind address (e.g. over a `tailscale serve` proxy) can read pane
+  output and review diffs. This is an accepted limitation; if you need the daemon
+  exposed to untrusted peers, consider binding it behind a reverse proxy that adds its
+  own auth.
+- **IPv4-mapped IPv6.** The guard canonicalizes the peer address before the
+  loopback check (`to_canonical()`), so a local hook curling `127.0.0.1`
+  against a dual-stack `[::]` bind — which surfaces as the IPv4-mapped
+  `::ffff:127.0.0.1` — is correctly treated as loopback and allowed.
+
 ## Requirements
 
 - Rust toolchain (to build), `tmux` 3.2+ (for `display-popup`), `git`
