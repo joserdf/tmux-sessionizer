@@ -8,6 +8,7 @@ pub mod discover;
 pub mod hooks;
 pub mod hooks_install;
 pub mod inventory;
+pub mod naming;
 pub mod notify;
 pub mod ops;
 pub mod resources;

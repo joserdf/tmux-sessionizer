@@ -115,6 +115,14 @@ Rejected alternatives:
    (the user renamed it), set `@sessionizer_autoname off` and never touch it again.
 3. **`src/config.rs:514` `Config`**: `[naming] enabled = true, max_len = 32`.
 
+**As built (deviations):**
+- `rename-window` turns `automatic-rename` off by itself, so no separate `set-window-option`.
+- A window with `automatic-rename` off and no `@sessionizer_lastname` was named by hand before
+  showrunner saw it; it is marked `@sessionizer_autoname off` too.
+- tmux takes an argv ending in `;` as a command separator, so `clean_title` drops a trailing `;`;
+  names go after `--` so a leading `-` isn't read as a flag.
+- With several agent panes and none active, the first one with a usable title names the window.
+
 ### Phase 3 — Manual categories (depends on 0; parallel with 2)
 
 1. Category lives in the tmux session option `@category` (so plain tmux tools see it) and is

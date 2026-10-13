@@ -535,6 +535,9 @@ pub struct Config {
     /// to disabled (opt-in) because closing sessions is destructive.
     #[serde(default)]
     pub auto_close: crate::autoclose::AutoCloseConfig,
+    /// Name agent windows after the agent's session title. A table.
+    #[serde(default)]
+    pub naming: crate::naming::NamingConfig,
 }
 
 /// Root directory for all showrunner data: ~/.showrunner
