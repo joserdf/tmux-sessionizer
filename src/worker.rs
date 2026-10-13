@@ -478,12 +478,11 @@ fn worker_loop(
                         d.cwd.as_deref(),
                     );
                     if let Some(p) = pane {
-                        let st = pane_states.entry(p.id.clone()).or_default();
-                        if d.session_id.is_some() {
-                            st.agent_session_id = d.session_id.clone();
-                        }
-                        st.last_event = Some(d.event.clone());
-                        st.last_event_at = Some(now);
+                        pane_states.entry(p.id.clone()).or_default().record(
+                            &d.event,
+                            d.session_id.as_deref(),
+                            now,
+                        );
                     }
                     let Some(status) = d.event.status_hint() else {
                         continue;

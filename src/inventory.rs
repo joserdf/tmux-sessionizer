@@ -54,6 +54,20 @@ pub struct PaneState {
     pub last_event_at: Option<u64>,
 }
 
+impl PaneState {
+    /// Record a hook event delivered for this pane. A session end forgets the
+    /// agent session id, so a later agent in the same pane can't inherit it.
+    pub fn record(&mut self, event: &AgentEvent, session_id: Option<&str>, now: u64) {
+        if *event == AgentEvent::SessionStopped {
+            self.agent_session_id = None;
+        } else if let Some(id) = session_id {
+            self.agent_session_id = Some(id.to_string());
+        }
+        self.last_event = Some(event.clone());
+        self.last_event_at = Some(now);
+    }
+}
+
 /// `list-panes -F` format matching [`parse_panes`]. The title goes last so a
 /// tab inside it can't shift the other fields.
 const FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_index}\t\
@@ -350,6 +364,18 @@ mod tests {
         refresh_states(&mut states, &[pane("%1", "s", "claude", "/a")]);
         assert_eq!(states["%1"].agent.as_deref(), Some("claude"));
         assert_eq!(states["%1"].agent_session_id.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn record_forgets_session_id_on_stop() {
+        let mut st = PaneState::default();
+        st.record(&AgentEvent::SessionStarted, Some("abc"), 10);
+        st.record(&AgentEvent::Finished, None, 11);
+        assert_eq!(st.agent_session_id.as_deref(), Some("abc"));
+        assert_eq!(st.last_event_at, Some(11));
+        st.record(&AgentEvent::SessionStopped, Some("abc"), 12);
+        assert_eq!(st.agent_session_id, None);
+        assert_eq!(st.last_event, Some(AgentEvent::SessionStopped));
     }
 
     #[test]
