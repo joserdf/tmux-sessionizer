@@ -8,7 +8,7 @@
 //! Parsers are pure (fixture-tested); process and tmux I/O is isolated in the
 //! thin wrappers [`list_panes`] and [`foreground_argv`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 
 use crate::agent::AgentKind;
@@ -41,6 +41,41 @@ pub struct Pane {
     pub title: String,
 }
 
+/// What an agent pane needs from the user, ordered by urgency: the `max`
+/// over a window's panes is the window's status.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Idle,
+    Working,
+    /// Finished a turn, result not seen yet.
+    Done,
+    Error,
+    Question,
+    Permission,
+}
+
+impl AgentStatus {
+    /// Value of the `@agent_status` tmux window option.
+    pub fn code(self) -> &'static str {
+        match self {
+            AgentStatus::Idle => "idle",
+            AgentStatus::Working => "working",
+            AgentStatus::Done => "done",
+            AgentStatus::Error => "error",
+            AgentStatus::Question => "question",
+            AgentStatus::Permission => "permission",
+        }
+    }
+}
+
+/// Seconds a finished pane must be on screen before its result counts as read.
+const READ_AFTER: u64 = 2;
+/// Output within this many seconds counts as "producing output now".
+const ACTIVITY_WINDOW: u64 = 2;
+
 /// Per-pane agent state, carried across worker ticks and keyed by pane id.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PaneState {
@@ -52,19 +87,191 @@ pub struct PaneState {
     pub last_event: Option<AgentEvent>,
     /// Unix time `last_event` arrived.
     pub last_event_at: Option<u64>,
+    /// Derived each tick by [`update_statuses`]; `None` for non-agent panes.
+    pub status: Option<AgentStatus>,
+    /// The last finished turn has been on screen for [`READ_AFTER`] seconds.
+    pub read: bool,
+    /// Since when the pane has been continuously on screen.
+    #[serde(skip)]
+    viewed_since: Option<u64>,
 }
 
 impl PaneState {
     /// Record a hook event delivered for this pane. A session end forgets the
     /// agent session id, so a later agent in the same pane can't inherit it.
+    /// A permission request while a question is pending is the question's own
+    /// prompt (Claude's `AskUserQuestion` also fires `PermissionRequest` and a
+    /// `permission_prompt` notification), so it keeps the question.
     pub fn record(&mut self, event: &AgentEvent, session_id: Option<&str>, now: u64) {
+        if *event == AgentEvent::PermissionRequest && self.last_event == Some(AgentEvent::Question)
+        {
+            return;
+        }
         if *event == AgentEvent::SessionStopped {
             self.agent_session_id = None;
         } else if let Some(id) = session_id {
             self.agent_session_id = Some(id.to_string());
         }
+        if *event == AgentEvent::Finished {
+            self.read = false;
+            self.viewed_since = None;
+        }
         self.last_event = Some(event.clone());
         self.last_event_at = Some(now);
+    }
+
+    fn update_view(&mut self, viewing: bool, now: u64) {
+        if !viewing {
+            self.viewed_since = None;
+            return;
+        }
+        let since = *self.viewed_since.get_or_insert(now);
+        if now.saturating_sub(since) >= READ_AFTER {
+            self.read = true;
+        }
+    }
+
+    /// Status from the last hook event. Without one (no hooks, or none yet),
+    /// and for agents whose hooks don't report turn starts, recent pane
+    /// output means working. `window_activity` is per window, so output in
+    /// a sibling pane counts too.
+    fn derive_status(&self, pane: &Pane, now: u64) -> Option<AgentStatus> {
+        use AgentStatus::*;
+        let outputting = now.saturating_sub(pane.activity) <= ACTIVITY_WINDOW;
+        let from_event = match &self.last_event {
+            None => None,
+            Some(AgentEvent::SessionStopped) => return None,
+            Some(AgentEvent::PermissionRequest) => Some(Permission),
+            Some(AgentEvent::Question | AgentEvent::NeedsInput) => Some(Question),
+            Some(AgentEvent::Error(_)) => Some(Error),
+            Some(AgentEvent::Working) => Some(Working),
+            Some(AgentEvent::Finished) => Some(if self.read { Idle } else { Done }),
+            Some(AgentEvent::Idle | AgentEvent::SessionStarted) => Some(Idle),
+        };
+        let Some(status) = from_event else {
+            return self
+                .agent
+                .is_some()
+                .then_some(if outputting { Working } else { Idle });
+        };
+        let guesses_turns = self
+            .agent
+            .as_deref()
+            .and_then(AgentKind::from_id)
+            .is_some_and(|k| !k.reports_turn_start());
+        let output_since_event = pane.activity > self.last_event_at.unwrap_or(0);
+        if matches!(status, Idle | Done) && guesses_turns && outputting && output_since_event {
+            Some(Working)
+        } else {
+            Some(status)
+        }
+    }
+}
+
+/// Recompute each pane's status (after this tick's hooks were recorded) and
+/// return the panes whose status changed, with the new status.
+pub fn update_statuses<'a>(
+    states: &mut HashMap<String, PaneState>,
+    panes: &'a [Pane],
+    now: u64,
+) -> Vec<(&'a Pane, AgentStatus)> {
+    let mut changed = Vec::new();
+    for pane in panes {
+        let Some(st) = states.get_mut(&pane.id) else {
+            continue;
+        };
+        st.update_view(pane.active && pane.attached, now);
+        let status = st.derive_status(pane, now);
+        if status != st.status {
+            st.status = status;
+            if let Some(s) = status {
+                changed.push((pane, s));
+            }
+        }
+    }
+    changed
+}
+
+/// Quiet time as shown in `@agent_idle`: empty under a minute, else the
+/// largest whole unit (`12m`, `3h`, `2d`).
+pub fn format_idle(secs: u64) -> String {
+    match secs {
+        0..60 => String::new(),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
+}
+
+/// `(@agent_status, @agent_idle)` for every window: its most urgent pane
+/// status, and how long it has been quiet when nothing is pending (`Idle`
+/// or `Done`). Windows without agents get empty values, which clears options
+/// left over from a previous daemon run.
+pub fn window_options(
+    panes: &[Pane],
+    states: &HashMap<String, PaneState>,
+    now: u64,
+) -> HashMap<String, (String, String)> {
+    let mut worst: HashMap<&str, (Option<AgentStatus>, u64)> = HashMap::new();
+    for pane in panes {
+        let entry = worst
+            .entry(&pane.window_id)
+            .or_insert((None, pane.activity));
+        entry.0 = entry.0.max(states.get(&pane.id).and_then(|s| s.status));
+    }
+    worst
+        .into_iter()
+        .map(|(window, (status, activity))| {
+            let idle = match status {
+                Some(AgentStatus::Idle | AgentStatus::Done) => {
+                    format_idle(now.saturating_sub(activity))
+                }
+                _ => String::new(),
+            };
+            let code = status.map_or("", AgentStatus::code).to_string();
+            (window.to_string(), (code, idle))
+        })
+        .collect()
+}
+
+/// `tmux` arguments bringing each window's options from `published` to
+/// `wanted`, chained with `;` into one invocation (empty when nothing
+/// changed). `published` is updated, and windows that are gone are dropped.
+pub fn window_option_args(
+    published: &mut HashMap<String, (String, String)>,
+    wanted: HashMap<String, (String, String)>,
+) -> Vec<String> {
+    let live: HashSet<&String> = wanted.keys().collect();
+    published.retain(|w, _| live.contains(w));
+    let mut args: Vec<String> = Vec::new();
+    let mut windows: Vec<_> = wanted.into_iter().collect();
+    windows.sort();
+    for (window, value) in windows {
+        if published.get(&window) == Some(&value) {
+            continue;
+        }
+        for (opt, v) in [("@agent_status", &value.0), ("@agent_idle", &value.1)] {
+            if !args.is_empty() {
+                args.push(";".into());
+            }
+            args.extend(["set-option", "-w", "-t", &window, opt, v].map(String::from));
+        }
+        published.insert(window, value);
+    }
+    args
+}
+
+/// Publish `@agent_status`/`@agent_idle` window options for changed windows
+/// (one tmux call, none when nothing changed).
+pub fn apply_window_options(
+    published: &mut HashMap<String, (String, String)>,
+    panes: &[Pane],
+    states: &HashMap<String, PaneState>,
+    now: u64,
+) {
+    let args = window_option_args(published, window_options(panes, states, now));
+    if !args.is_empty() {
+        let _ = Command::new("tmux").args(&args).output();
     }
 }
 
@@ -367,6 +574,18 @@ mod tests {
     }
 
     #[test]
+    fn permission_while_question_pending_keeps_question() {
+        let mut st = PaneState::default();
+        st.record(&AgentEvent::Question, None, 10);
+        st.record(&AgentEvent::PermissionRequest, None, 11);
+        assert_eq!(st.last_event, Some(AgentEvent::Question));
+        // Once answered (PostToolUse -> Working), a permission counts again.
+        st.record(&AgentEvent::Working, None, 12);
+        st.record(&AgentEvent::PermissionRequest, None, 13);
+        assert_eq!(st.last_event, Some(AgentEvent::PermissionRequest));
+    }
+
+    #[test]
     fn record_forgets_session_id_on_stop() {
         let mut st = PaneState::default();
         st.record(&AgentEvent::SessionStarted, Some("abc"), 10);
@@ -376,6 +595,174 @@ mod tests {
         st.record(&AgentEvent::SessionStopped, Some("abc"), 12);
         assert_eq!(st.agent_session_id, None);
         assert_eq!(st.last_event, Some(AgentEvent::SessionStopped));
+    }
+
+    fn at(pane_activity: u64) -> Pane {
+        let mut p = pane("%1", "s", "claude", "/a");
+        p.activity = pane_activity;
+        p
+    }
+
+    fn state(agent: &str, event: Option<AgentEvent>, at: u64) -> PaneState {
+        PaneState {
+            agent: Some(agent.into()),
+            last_event: event,
+            last_event_at: Some(at),
+            ..PaneState::default()
+        }
+    }
+
+    #[test]
+    fn status_from_events() {
+        use AgentStatus::*;
+        let p = at(0);
+        let cases = [
+            (AgentEvent::PermissionRequest, Permission),
+            (AgentEvent::Question, Question),
+            (AgentEvent::NeedsInput, Question),
+            (AgentEvent::Error("x".into()), Error),
+            (AgentEvent::Working, Working),
+            (AgentEvent::Finished, Done),
+            (AgentEvent::Idle, Idle),
+            (AgentEvent::SessionStarted, Idle),
+        ];
+        for (ev, want) in cases {
+            assert_eq!(
+                state("claude", Some(ev.clone()), 50).derive_status(&p, 100),
+                Some(want),
+                "{ev:?}"
+            );
+        }
+        assert_eq!(
+            state("claude", Some(AgentEvent::SessionStopped), 50).derive_status(&p, 100),
+            None
+        );
+    }
+
+    #[test]
+    fn status_without_events_follows_output() {
+        let st = state("claude", None, 0);
+        assert_eq!(st.derive_status(&at(99), 100), Some(AgentStatus::Working));
+        assert_eq!(st.derive_status(&at(50), 100), Some(AgentStatus::Idle));
+        // Not an agent pane, no events: no status.
+        assert_eq!(PaneState::default().derive_status(&at(99), 100), None);
+    }
+
+    #[test]
+    fn output_after_done_means_working_only_for_agents_without_turn_hooks() {
+        // Codex only reports finished turns: new output after it is a new turn.
+        let codex = state("codex", Some(AgentEvent::Finished), 50);
+        assert_eq!(
+            codex.derive_status(&at(99), 100),
+            Some(AgentStatus::Working)
+        );
+        assert_eq!(codex.derive_status(&at(40), 100), Some(AgentStatus::Done));
+        // Claude reports UserPromptSubmit, so output (e.g. typing) doesn't flip it.
+        let claude = state("claude", Some(AgentEvent::Finished), 50);
+        assert_eq!(claude.derive_status(&at(99), 100), Some(AgentStatus::Done));
+    }
+
+    #[test]
+    fn done_becomes_idle_after_being_viewed() {
+        let mut p = at(0);
+        p.active = true;
+        p.attached = true;
+        let mut states = HashMap::from([("%1".to_string(), PaneState::default())]);
+        states.get_mut("%1").unwrap().agent = Some("claude".into());
+        states
+            .get_mut("%1")
+            .unwrap()
+            .record(&AgentEvent::Finished, None, 100);
+        let panes = [p];
+
+        let changed = update_statuses(&mut states, &panes, 100);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].1, AgentStatus::Done);
+        assert!(update_statuses(&mut states, &panes, 101).is_empty());
+        let changed = update_statuses(&mut states, &panes, 102);
+        assert_eq!(changed[0].1, AgentStatus::Idle);
+        // A new finished turn is unread again.
+        states
+            .get_mut("%1")
+            .unwrap()
+            .record(&AgentEvent::Finished, None, 110);
+        assert_eq!(
+            update_statuses(&mut states, &panes, 110)[0].1,
+            AgentStatus::Done
+        );
+    }
+
+    #[test]
+    fn format_idle_units() {
+        assert_eq!(format_idle(59), "");
+        assert_eq!(format_idle(60 * 12), "12m");
+        assert_eq!(format_idle(3600 * 3 + 5), "3h");
+        assert_eq!(format_idle(86400 * 2), "2d");
+    }
+
+    #[test]
+    fn window_takes_most_urgent_pane() {
+        let mut a = pane("%1", "s", "claude", "/a");
+        let mut b = pane("%2", "s", "claude", "/a");
+        let mut c = pane("%3", "s", "zsh", "/a");
+        c.window_id = "@9".into();
+        a.activity = 0;
+        b.activity = 0;
+        let states = HashMap::from([
+            (
+                "%1".to_string(),
+                PaneState {
+                    status: Some(AgentStatus::Working),
+                    ..Default::default()
+                },
+            ),
+            (
+                "%2".to_string(),
+                PaneState {
+                    status: Some(AgentStatus::Permission),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let opts = window_options(&[a.clone(), b.clone(), c.clone()], &states, 1000);
+        assert_eq!(opts["@1"], ("permission".to_string(), String::new()));
+        assert_eq!(opts["@9"], (String::new(), String::new()));
+
+        let states = HashMap::from([(
+            "%1".to_string(),
+            PaneState {
+                status: Some(AgentStatus::Idle),
+                ..Default::default()
+            },
+        )]);
+        let opts = window_options(&[a], &states, 600);
+        assert_eq!(opts["@1"], ("idle".to_string(), "10m".to_string()));
+    }
+
+    #[test]
+    fn window_option_args_only_for_changes_in_one_call() {
+        let mut published = HashMap::new();
+        let wanted = |s: &str| {
+            HashMap::from([
+                ("@1".to_string(), (s.to_string(), String::new())),
+                ("@2".to_string(), (String::new(), String::new())),
+            ])
+        };
+        let args = window_option_args(&mut published, wanted("done"));
+        assert_eq!(args.iter().filter(|a| *a == ";").count(), 3);
+        assert_eq!(
+            &args[..6],
+            ["set-option", "-w", "-t", "@1", "@agent_status", "done"]
+        );
+        // Unchanged: nothing to run.
+        assert!(window_option_args(&mut published, wanted("done")).is_empty());
+        // One window changed: only its two options.
+        let args = window_option_args(&mut published, wanted("idle"));
+        assert_eq!(args.len(), 13);
+        assert!(args.iter().all(|a| a != "@2"));
+        // A vanished window is forgotten.
+        window_option_args(&mut published, HashMap::new());
+        assert!(published.is_empty());
     }
 
     #[test]

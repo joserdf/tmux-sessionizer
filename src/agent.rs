@@ -56,6 +56,13 @@ impl AgentKind {
         }
     }
 
+    /// Whether the agent's hooks report the start of a turn (so the
+    /// inventory need not guess "working" from pane output). Codex `notify`
+    /// only reports completed turns; Pi has no hooks.
+    pub fn reports_turn_start(self) -> bool {
+        matches!(self, AgentKind::Claude | AgentKind::OpenCode)
+    }
+
     /// All known agents, in picker order.
     pub const ALL: &[AgentKind] = &[
         AgentKind::Claude,

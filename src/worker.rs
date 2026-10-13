@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::autoclose::{self, AutoCloseConfig, CloseAction};
 use crate::hooks::HookDelivery;
-use crate::inventory::{self, Pane, PaneState};
+use crate::inventory::{self, AgentStatus, Pane, PaneState};
 use crate::resources::SessionResources;
 use crate::tmux::{self, DiffStats, SessionStatus, TmuxSession};
 
@@ -306,6 +306,27 @@ fn parse_sse_frame(frame: &str) -> Option<WorkerUpdate> {
     serde_json::from_str::<WorkerUpdate>(&data).ok()
 }
 
+/// Notify on a pane entering a state that wants the user, unless they are
+/// looking at it. Permission prompts in `cm__` sessions are left to the
+/// session-level notification, which also covers scrape-only agents.
+fn notify_pane_status(pane: &Pane, status: AgentStatus) {
+    if pane.active && pane.attached {
+        return;
+    }
+    let what = match status {
+        AgentStatus::Permission if TmuxSession::from_tmux_name(&pane.session).is_some() => return,
+        AgentStatus::Permission => "needs permission",
+        AgentStatus::Question => "has a question",
+        AgentStatus::Done => "finished",
+        _ => return,
+    };
+    crate::notify::send(&crate::notify::Notification {
+        title: format!("showrunner: agent {what}"),
+        body: format!("{}:{} ({})", pane.session, pane.window_name, pane.id),
+        urgent: status != AgentStatus::Done,
+    });
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -358,6 +379,9 @@ fn worker_loop(
     // session isn't re-scanned by `git status` on every auto-close pass.
     let mut dirty_cache: HashMap<String, (Instant, bool)> = HashMap::new();
     let mut pane_states: HashMap<String, PaneState> = HashMap::new();
+    // `@agent_status`/`@agent_idle` last written per window, so tmux is only
+    // called for changes.
+    let mut published_windows: HashMap<String, (String, String)> = HashMap::new();
 
     // A hung daemon (TCP open, but no frames — a wedged server task) keeps
     // `connected` true and would otherwise freeze the dashboard with no banner.
@@ -498,6 +522,14 @@ fn worker_loop(
                 }
             }
         }
+
+        // Pane-level status for every pane on the server (not only `cm__`
+        // sessions), published to tmux as window options.
+        let now = unix_now();
+        for (pane, status) in inventory::update_statuses(&mut pane_states, &panes, now) {
+            notify_pane_status(pane, status);
+        }
+        inventory::apply_window_options(&mut published_windows, &panes, &pane_states, now);
 
         // Surface a permission prompt to the OS (once per transition), so the
         // user is alerted even when the TUI is in another pane. The tmux status
