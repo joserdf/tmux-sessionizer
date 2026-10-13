@@ -1,0 +1,20 @@
+# showrunner daemon as a systemd user service.
+#
+#   cargo build --release
+#   install -Dm644 contrib/systemd/showrunner.service ~/.config/systemd/user/showrunner.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now showrunner
+#
+# Adjust ExecStart if the repo is not at ~/tmux-sessionizer. The daemon talks to
+# the default tmux server socket, so it sees the same sessions as your shell.
+[Unit]
+Description=showrunner daemon (agent status, hooks, API)
+After=default.target
+
+[Service]
+ExecStart=%h/tmux-sessionizer/target/release/showrunner serve
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
