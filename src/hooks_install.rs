@@ -157,14 +157,22 @@ fn claude_uninstall(settings: &str, command: &str) -> Result<String> {
 
 /// True when every template event has a group running `command`.
 fn claude_installed(settings: &str, command: &str) -> bool {
-    let Ok(root) = parse_settings(settings) else {
-        return false;
-    };
-    hook_template().iter().all(|(event, _)| {
-        root["hooks"][event]
-            .as_array()
-            .is_some_and(|l| l.iter().any(|g| group_runs(g, command)))
-    })
+    claude_missing_events(settings, command).is_empty()
+}
+
+/// Template events with no group running `command` (all of them when the
+/// settings don't parse).
+fn claude_missing_events(settings: &str, command: &str) -> Vec<String> {
+    let root = parse_settings(settings).unwrap_or_default();
+    hook_template()
+        .into_iter()
+        .map(|(event, _)| event)
+        .filter(|event| {
+            !root["hooks"][event]
+                .as_array()
+                .is_some_and(|l| l.iter().any(|g| group_runs(g, command)))
+        })
+        .collect()
 }
 
 // ---- Codex: ~/.codex/config.toml -----------------------------------------
@@ -228,14 +236,14 @@ fn plan_install(p: &Paths) -> Result<(Vec<Edit>, Vec<String>)> {
         let path = p.claude_settings();
         let before = read(&path);
         let after = claude_install(&before, &p.claude_command())?;
-        if after != before && !claude_installed(&before, &p.claude_command()) {
-            let events: Vec<String> = hook_template().into_iter().map(|(e, _)| e).collect();
+        let missing = claude_missing_events(&before, &p.claude_command());
+        if after != before && !missing.is_empty() {
             edits.push(Edit {
                 path,
                 after: Some(after),
                 executable: false,
                 backup: true,
-                what: format!("add hooks: {}", events.join(", ")),
+                what: format!("add hooks: {}", missing.join(", ")),
             });
         }
     } else {
@@ -497,6 +505,10 @@ mod tests {
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "mine");
         assert_eq!(v["hooks"]["Stop"][1]["hooks"][0]["command"], CMD);
         assert!(claude_installed(&after, CMD));
+        // A template event added later shows up as the only missing one.
+        let mut v = v;
+        v["hooks"].as_object_mut().unwrap().remove("PostToolUse");
+        assert_eq!(claude_missing_events(&v.to_string(), CMD), ["PostToolUse"]);
         assert!(!claude_installed(before, CMD));
     }
 
