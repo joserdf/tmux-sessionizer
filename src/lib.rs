@@ -6,6 +6,7 @@ pub mod config;
 mod entry;
 pub mod discover;
 pub mod hooks;
+pub mod inventory;
 pub mod notify;
 pub mod ops;
 pub mod resources;

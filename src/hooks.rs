@@ -12,7 +12,7 @@
 //! parsers are robust to field order and extra fields.
 
 /// A normalized lifecycle event reported by an agent hook.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// A new agent session began.
@@ -51,6 +51,20 @@ impl AgentEvent {
             AgentEvent::Error(_) => None,
         }
     }
+}
+
+/// A normalized event plus the keys that tie it back to a tmux pane, as queued
+/// by `POST /api/hook` for the worker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookDelivery {
+    /// The agent's `$TMUX_PANE` (e.g. `%3`): the exact correlation key.
+    pub tmux_pane: Option<String>,
+    /// The agent's working directory: fallback key for clients that predate
+    /// `tmux_pane`. Ambiguous when several agents share a directory.
+    pub cwd: Option<String>,
+    /// The agent's own session id (what `--resume`/`-s` takes).
+    pub session_id: Option<String>,
+    pub event: AgentEvent,
 }
 
 /// Parse a Claude Code hook payload.
