@@ -52,6 +52,7 @@ export default async ({ directory }) => {
         // session.status) so the daemon isn't sent a duplicate finish per turn.
         case "session.status":
           if (props.status && props.status.type === "idle") post("session.finish", sid)
+          else if (props.status && props.status.type === "busy") post("session.busy", sid)
           break
         case "session.error":
           post("session.error", {

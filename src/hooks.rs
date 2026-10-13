@@ -23,6 +23,11 @@ pub enum AgentEvent {
     PermissionRequest,
     /// The agent is blocked waiting for user input.
     NeedsInput,
+    /// The agent asked the user a question (e.g. Claude's `AskUserQuestion`).
+    Question,
+    /// The agent started (or resumed) working: a prompt was submitted or a
+    /// tool finished.
+    Working,
     /// The agent finished its current turn or task.
     Finished,
     /// The agent session is idle.
@@ -44,7 +49,10 @@ impl AgentEvent {
         use crate::tmux::SessionStatus;
         match self {
             AgentEvent::PermissionRequest => Some(SessionStatus::WaitingForPermission),
-            AgentEvent::NeedsInput | AgentEvent::Idle => Some(SessionStatus::WaitingForInput),
+            AgentEvent::NeedsInput | AgentEvent::Question | AgentEvent::Idle => {
+                Some(SessionStatus::WaitingForInput)
+            }
+            AgentEvent::Working => Some(SessionStatus::Running),
             AgentEvent::Finished => Some(SessionStatus::WaitingForInput),
             AgentEvent::SessionStopped => Some(SessionStatus::Finished),
             AgentEvent::SessionStarted => Some(SessionStatus::Running),
@@ -86,6 +94,12 @@ pub fn parse_claude_hook(json: &str) -> Option<AgentEvent> {
         "Stop" => Some(AgentEvent::Finished),
         "PermissionRequest" => Some(AgentEvent::PermissionRequest),
         "Notification" => classify_notification(&value),
+        "UserPromptSubmit" | "PostToolUse" => Some(AgentEvent::Working),
+        // Subscribed with an `AskUserQuestion` matcher; other tools are ignored
+        // so a racing async delivery can't mask a permission prompt.
+        "PreToolUse" => (value.get("tool_name").and_then(|v| v.as_str())
+            == Some("AskUserQuestion"))
+        .then_some(AgentEvent::Question),
         _ => None,
     }
 }
@@ -103,7 +117,10 @@ fn classify_notification(value: &serde_json::Value) -> Option<AgentEvent> {
         return match t {
             "permission_prompt" => Some(AgentEvent::PermissionRequest),
             "agent_completed" => Some(AgentEvent::Finished),
-            "idle_prompt" | "agent_needs_input" => Some(AgentEvent::NeedsInput),
+            "idle_prompt" => Some(AgentEvent::Idle),
+            "agent_needs_input" => Some(AgentEvent::NeedsInput),
+            "elicitation_dialog" => Some(AgentEvent::Question),
+            "elicitation_complete" | "elicitation_response" => Some(AgentEvent::Working),
             _ => None,
         };
     }
@@ -147,6 +164,7 @@ pub fn parse_opencode_hook(json: &str) -> Option<AgentEvent> {
     match event_type {
         "session.start" => Some(AgentEvent::SessionStarted),
         "session.finish" => Some(AgentEvent::Finished),
+        "session.busy" => Some(AgentEvent::Working),
         "session.idle" => Some(AgentEvent::Idle),
         // Emitted by the plugin's `dispose` hook when the opencode instance
         // shuts down (there is no dedicated "session end" bus event).
@@ -218,7 +236,7 @@ mod tests {
     #[test]
     fn claude_notification_idle_prompt() {
         let json = r#"{"hook_event_name":"Notification","message":"Agent is idle","title":"Idle","matcher":"idle_prompt","session_id":"abc123"}"#;
-        assert_eq!(parse_claude_hook(json), Some(AgentEvent::NeedsInput));
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::Idle));
     }
 
     #[test]
@@ -239,7 +257,22 @@ mod tests {
         let json = r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Write","notification_type":"permission_prompt","session_id":"abc123"}"#;
         assert_eq!(parse_claude_hook(json), Some(AgentEvent::PermissionRequest));
         let json = r#"{"hook_event_name":"Notification","message":"idle","notification_type":"idle_prompt","session_id":"abc123"}"#;
-        assert_eq!(parse_claude_hook(json), Some(AgentEvent::NeedsInput));
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::Idle));
+        let json = r#"{"hook_event_name":"Notification","message":"MCP asks","notification_type":"elicitation_dialog"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::Question));
+    }
+
+    #[test]
+    fn claude_working_and_question_events() {
+        let json = r#"{"hook_event_name":"UserPromptSubmit","prompt":"hi","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::Working));
+        let json = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::Working));
+        let json = r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), Some(AgentEvent::Question));
+        // Any other tool's PreToolUse carries no signal.
+        let json = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"abc123"}"#;
+        assert_eq!(parse_claude_hook(json), None);
     }
 
     #[test]
@@ -277,7 +310,7 @@ mod tests {
 
     #[test]
     fn claude_unknown_event_name_is_none() {
-        let json = r#"{"hook_event_name":"UserPromptSubmit","message":"prompt","title":"Prompt","matcher":"","session_id":"abc123"}"#;
+        let json = r#"{"hook_event_name":"PreCompact","message":"compact","matcher":"","session_id":"abc123"}"#;
         assert_eq!(parse_claude_hook(json), None);
     }
 
@@ -348,6 +381,14 @@ mod tests {
         assert_eq!(
             parse_opencode_hook(json),
             Some(AgentEvent::Error("error".to_owned()))
+        );
+    }
+
+    #[test]
+    fn opencode_session_busy() {
+        assert_eq!(
+            parse_opencode_hook(r#"{"type":"session.busy"}"#),
+            Some(AgentEvent::Working)
         );
     }
 
