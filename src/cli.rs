@@ -46,6 +46,11 @@ Agent hooks (status from any tmux pane, not only showrunner sessions):
   showrunner hooks install|uninstall [--yes]    wire Claude/OpenCode/Codex hooks
   showrunner hooks status
 
+Categories (tmux session option @category):
+  showrunner category set <session> <name>      letters, digits, - _ .
+  showrunner category clear <session>
+  showrunner category list [--json]
+
 <session> is a ref from `list` — `<project>/<task>/<session>`, `<project>/<task>`
 for that task's main session, or a raw tmux session name.
 ";
@@ -64,6 +69,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("output") => Some(cmd_output(rest)),
         Some("discover") => Some(cmd_discover(rest)),
         Some("hooks") => Some(crate::hooks_install::cmd_hooks(rest)),
+        Some("category") => Some(crate::category::cmd_category(rest)),
         Some("--help" | "-h" | "help") => {
             print!("{HELP}");
             Some(Ok(()))

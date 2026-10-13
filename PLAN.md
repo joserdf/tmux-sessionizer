@@ -130,6 +130,11 @@ Rejected alternatives:
 2. **`src/cli.rs`**: `showrunner category set <session> <name>` / `clear` / `list`.
 3. **`src/server.rs:60-79`**: `POST /api/v2/sessions/{name}/category`; inventory exposes it.
 
+**As built:** `src/category.rs`. Names are 1-32 letters, digits, `-`, `_` or `.` (safe as tmux
+args and grouping keys). Sessions are addressed as `=name:` so `gate` never matches `gates`.
+`Pane.category` comes from `#{@category}` in the same `list-panes` call. The API body is
+`{"category": "work"}`; `null` or `""` clears it, and it works for any session, not only `cm__`.
+
 ### Phase 4 — Persistence: snapshot, closed history, restore after reboot (depends on 0, 3)
 
 1. **`src/snapshot.rs`** (new): `Snapshot { taken_at, sessions: [SessionSnap { name, category,

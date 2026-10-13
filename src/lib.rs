@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod app;
 pub mod autoclose;
+pub mod category;
 pub mod cli;
 pub mod config;
 mod entry;

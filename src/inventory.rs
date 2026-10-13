@@ -46,6 +46,9 @@ pub struct Pane {
     /// `@sessionizer_lastname`: the name auto-naming last gave the window.
     #[serde(default)]
     pub last_autoname: String,
+    /// The session's `@category` (empty when uncategorized).
+    #[serde(default)]
+    pub category: String,
     /// Title set by the program in the pane (Claude sets `✳ <session name>`).
     pub title: String,
 }
@@ -290,7 +293,7 @@ const FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_index}
 #{window_name}\t#{pane_index}\t#{pane_pid}\t#{pane_active}\t#{window_active}\t\
 #{session_attached}\t#{window_activity}\t#{pane_current_command}\t\
 #{pane_current_path}\t#{automatic-rename}\t#{@sessionizer_autoname}\t\
-#{@sessionizer_lastname}\t#{pane_title}";
+#{@sessionizer_lastname}\t#{@category}\t#{pane_title}";
 
 /// Parse `list-panes -a -F FORMAT` output. Malformed lines are skipped.
 pub fn parse_panes(stdout: &str) -> Vec<Pane> {
@@ -298,8 +301,8 @@ pub fn parse_panes(stdout: &str) -> Vec<Pane> {
 }
 
 fn parse_pane_line(line: &str) -> Option<Pane> {
-    let f: Vec<&str> = line.splitn(17, '\t').collect();
-    if f.len() != 17 {
+    let f: Vec<&str> = line.splitn(18, '\t').collect();
+    if f.len() != 18 {
         return None;
     }
     Some(Pane {
@@ -318,7 +321,8 @@ fn parse_pane_line(line: &str) -> Option<Pane> {
         automatic_rename: f[13] == "1",
         autoname_off: f[14] == "off",
         last_autoname: f[15].to_string(),
-        title: f[16].to_string(),
+        category: f[16].to_string(),
+        title: f[17].to_string(),
     })
 }
 
@@ -457,7 +461,7 @@ mod tests {
 
     fn line(id: &str, session: &str, command: &str, cwd: &str, title: &str) -> String {
         format!(
-            "{id}\t{session}\t@1\t0\twin\t0\t100\t1\t1\t1\t1700000000\t{command}\t{cwd}\t1\t\t\t{title}"
+            "{id}\t{session}\t@1\t0\twin\t0\t100\t1\t1\t1\t1700000000\t{command}\t{cwd}\t1\t\t\t\t{title}"
         )
     }
 
@@ -468,7 +472,7 @@ mod tests {
     #[test]
     fn parses_all_fields() {
         let p = parse_pane_line(
-            "%3\tgates\t@2\t1\tclaude\t0\t23685\t1\t0\t2\t1791900000\tclaude\t/home/u/gates\t0\toff\tgates\t✳ gates-presentation",
+            "%3\tgates\t@2\t1\tclaude\t0\t23685\t1\t0\t2\t1791900000\tclaude\t/home/u/gates\t0\toff\tgates\twork\t✳ gates-presentation",
         )
         .unwrap();
         assert_eq!(p.id, "%3");
@@ -485,6 +489,7 @@ mod tests {
         assert!(!p.automatic_rename);
         assert!(p.autoname_off);
         assert_eq!(p.last_autoname, "gates");
+        assert_eq!(p.category, "work");
         assert_eq!(p.title, "✳ gates-presentation");
     }
 
@@ -497,7 +502,7 @@ mod tests {
     #[test]
     fn malformed_lines_are_skipped() {
         let out = format!(
-            "garbage\n{}\n%2\ts\t@1\tX\tw\t0\t1\t1\t1\t0\t0\tzsh\t/\t1\t\t\t",
+            "garbage\n{}\n%2\ts\t@1\tX\tw\t0\t1\t1\t1\t0\t0\tzsh\t/\t1\t\t\t\t",
             line("%1", "s", "zsh", "/", "")
         );
         let panes = parse_panes(&out);

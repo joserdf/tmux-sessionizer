@@ -249,6 +249,7 @@ mod tests {
             automatic_rename: true,
             autoname_off: false,
             last_autoname: String::new(),
+            category: String::new(),
             title: title.into(),
         }
     }

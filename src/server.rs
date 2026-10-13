@@ -77,6 +77,7 @@ pub fn run(bind: &str) -> Result<()> {
         .route("/api/adhoc", post(api_create_adhoc))
         .route("/api/hook", post(api_hook))
         .route("/api/hook-events", get(api_hook_events))
+        .route("/api/v2/sessions/{name}/category", post(api_set_category))
         .with_state(state);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -577,6 +578,28 @@ async fn api_kill(Path(name): Path<String>) -> Result<StatusCode, ApiError> {
         .map_err(internal)?
         .map_err(internal)?;
 
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct CategoryBody {
+    /// `null` or `""` clears the category.
+    category: Option<String>,
+}
+
+/// Set or clear the `@category` of any tmux session (not only `cm__` ones).
+async fn api_set_category(
+    Path(name): Path<String>,
+    axum::Json(body): axum::Json<CategoryBody>,
+) -> Result<StatusCode, ApiError> {
+    let category = body.category.filter(|c| !c.trim().is_empty());
+    if let Some(c) = &category {
+        crate::category::validate(c).map_err(|e| bad_request(e.to_string()))?;
+    }
+    tokio::task::spawn_blocking(move || crate::category::set(&name, category.as_deref()))
+        .await
+        .map_err(internal)?
+        .map_err(|e| bad_request(e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
