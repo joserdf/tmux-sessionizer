@@ -1268,7 +1268,7 @@ fn ensure_codex_trust(work_dir: &str) {
 /// The path is a concrete absolute path (codex spawns `notify` directly, so env
 /// vars like `$HOME` are not expanded) and is TOML-escaped so a path with a
 /// backslash or quote can't corrupt the user's config.
-fn codex_notify_config_line(script: &str) -> String {
+pub(crate) fn codex_notify_config_line(script: &str) -> String {
     let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
     format!("notify = [\"bash\", \"{escaped}\"]\n")
 }
@@ -1276,7 +1276,7 @@ fn codex_notify_config_line(script: &str) -> String {
 /// True if `content` (a codex config.toml) already sets a top-level `notify`
 /// key — i.e. a `notify` assignment before the first `[section]` header. We
 /// must not clobber a user's own notify, so this is the respect-the-user check.
-fn config_has_top_level_notify(content: &str) -> bool {
+pub(crate) fn config_has_top_level_notify(content: &str) -> bool {
     content
         .lines()
         .take_while(|l| !l.trim_start().starts_with('['))
@@ -1549,13 +1549,14 @@ const PLUGIN_SKILL_COMMIT_PUSH_TASK: &str =
     include_str!("../showrunner-plugin/skills/commit-push-task/SKILL.md");
 const PLUGIN_SKILL_MANAGE_SESSIONS: &str =
     include_str!("../showrunner-plugin/skills/manage-sessions/SKILL.md");
-const PLUGIN_HOOKS_JSON: &str = include_str!("../showrunner-plugin/hooks/hooks.json");
-const PLUGIN_HOOKS_POST_EVENT: &str =
+pub(crate) const PLUGIN_HOOKS_JSON: &str = include_str!("../showrunner-plugin/hooks/hooks.json");
+pub(crate) const PLUGIN_HOOKS_POST_EVENT: &str =
     include_str!("../showrunner-plugin/hooks/post-event.sh");
 // Authoritative lifecycle hooks for the non-Claude agents: an OpenCode plugin
 // (auto-loaded from <project>/.opencode/plugins/) and a Codex `notify` handler.
-const OPENCODE_PLUGIN: &str = include_str!("../showrunner-plugin/opencode/showrunner.ts");
-const CODEX_NOTIFY: &str = include_str!("../showrunner-plugin/codex/codex-notify.sh");
+pub(crate) const OPENCODE_PLUGIN: &str =
+    include_str!("../showrunner-plugin/opencode/showrunner.ts");
+pub(crate) const CODEX_NOTIFY: &str = include_str!("../showrunner-plugin/codex/codex-notify.sh");
 
 /// Filesystem path to the installed showrunner plugin directory inside `work_dir`.
 /// This is the path passed to `claude --plugin-dir`.

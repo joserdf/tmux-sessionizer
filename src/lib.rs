@@ -6,6 +6,7 @@ pub mod config;
 mod entry;
 pub mod discover;
 pub mod hooks;
+pub mod hooks_install;
 pub mod inventory;
 pub mod notify;
 pub mod ops;

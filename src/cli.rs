@@ -42,6 +42,10 @@ Talking to another session:
 Discovery:
   showrunner discover [--json] [dir ...]        find git projects to add
 
+Agent hooks (status from any tmux pane, not only showrunner sessions):
+  showrunner hooks install|uninstall [--yes]    wire Claude/OpenCode/Codex hooks
+  showrunner hooks status
+
 <session> is a ref from `list` — `<project>/<task>/<session>`, `<project>/<task>`
 for that task's main session, or a raw tmux session name.
 ";
@@ -59,6 +63,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("send") => Some(cmd_send(rest)),
         Some("output") => Some(cmd_output(rest)),
         Some("discover") => Some(cmd_discover(rest)),
+        Some("hooks") => Some(crate::hooks_install::cmd_hooks(rest)),
         Some("--help" | "-h" | "help") => {
             print!("{HELP}");
             Some(Ok(()))
