@@ -93,6 +93,17 @@ Rejected alternatives:
    from `@agent_status`; documented, not auto-installed.
 6. **`src/notify.rs`**: notify on transitions into `Question`, `Permission`, `Done`.
 
+**As built (deviations):**
+- `AgentStatus` was added per pane in `src/inventory.rs` instead of replacing `SessionStatus`;
+  the existing TUI/web/autoclose pipeline is unchanged and Phase 7 consumes `AgentStatus`.
+  `Exited` was dropped: a pane whose agent exited has no status.
+- "Working" comes from async Claude hooks `UserPromptSubmit`/`PostToolUse` and OpenCode
+  `session.status busy`; agents without turn-start hooks (Codex, Pi) fall back to
+  `window_activity` after their last event.
+- `AskUserQuestion` also fires `PermissionRequest` + a `permission_prompt` notification; a
+  permission event while a question is pending keeps `Question`.
+- `idle_prompt` now maps to `Idle`; `elicitation_dialog` to `Question`.
+
 ### Phase 2 — Windows named after the agent session (depends on 0; parallel with 3)
 
 1. **`src/naming.rs`** (new): `clean_title(raw) -> Option<String>` strips leading spinner/glyph
