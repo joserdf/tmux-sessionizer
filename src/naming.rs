@@ -250,6 +250,10 @@ mod tests {
             autoname_off: false,
             last_autoname: String::new(),
             category: String::new(),
+            window_layout: String::new(),
+            window_active: false,
+            pane_active: false,
+            pending_restore: String::new(),
             title: title.into(),
         }
     }

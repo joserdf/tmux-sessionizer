@@ -179,6 +179,25 @@ args and grouping keys). Sessions are addressed as `=name:` so `gate` never matc
    the snapshot.
 5. **CLI**: `showrunner restore [--dry-run]`, `showrunner closed list`, `showrunner reopen <id>`.
 
+**As built (deviations):**
+- `src/snapshot.rs` builds the snapshot every worker tick from the inventory (layout and
+  per-window active pane were added to `list-panes`), so closed windows are diffed tick to tick.
+  Written at the tracker's first tick, at once on a new agent session id, rotated (5 kept) on a
+  structural change (sessions or window indexes), otherwise at most every 30 s.
+- Boot restore runs in `serve` before the HTTP server, when there is no tmux server, or the server
+  started after the snapshot and has no `@sessionizer_restored`. It always merges.
+- Prompt readiness is `#{cursor_x} > 0` (startup banners end in a newline), up to 5 s.
+- Restored panes keep what they ran in the pane option `@sessionizer_restore` until something runs
+  there, so a pasted but unrun command survives the next snapshot and reboot.
+- After a daemon restart, agent session ids are seeded from the last snapshot (same window id,
+  pane index, cwd and agent).
+- Resume commands drop a positional that doesn't follow a flag (the initial prompt), so Enter
+  doesn't send it again.
+- `cm__` sessions get their `CM_*` environment captured and restored instead of going through
+  `recreate_session`, which would run the agent instead of pasting.
+- `reopen` adds a window at the next free index when its old index is taken.
+- `restore --file <path>` restores a rotation (`~/.showrunner/snapshot.N.json`).
+
 ### Phase 5 — Inactivity and auto-close for windows and any session (depends on 1, 4)
 
 1. Idle time per window: agent panes `now - status_since` when `Idle`/`Done`; shell panes

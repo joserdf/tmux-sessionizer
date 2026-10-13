@@ -365,10 +365,15 @@ fn worker_loop(
     let mut generation: u64 = 0;
     // Auto-close policy (opt-in; disabled by default) and window naming. Read
     // once at start.
-    let (auto_close, naming) = match crate::config::Config::load() {
-        Ok(c) => (c.auto_close, c.naming),
-        Err(_) => (AutoCloseConfig::default(), Default::default()),
+    let (auto_close, naming, restore) = match crate::config::Config::load() {
+        Ok(c) => (c.auto_close, c.naming, c.restore),
+        Err(_) => (
+            AutoCloseConfig::default(),
+            Default::default(),
+            Default::default(),
+        ),
     };
+    let mut snapshots = crate::snapshot::Tracker::new();
     // tmux's default pane title, never used as a window name.
     let hostname = crate::app::detect_hostname();
     let mut idle_since: HashMap<String, Instant> = HashMap::new();
@@ -534,6 +539,7 @@ fn worker_loop(
         }
         inventory::apply_window_options(&mut published_windows, &panes, &pane_states, now);
         crate::naming::apply_names(&panes, &pane_states, &naming, &hostname);
+        snapshots.tick(&panes, &mut pane_states, &restore.redact, now);
 
         // Surface a permission prompt to the OS (once per transition), so the
         // user is alerted even when the TUI is in another pane. The tmux status

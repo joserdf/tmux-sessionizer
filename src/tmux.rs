@@ -127,7 +127,7 @@ pub fn to_branch_name(task_name: &str) -> String {
     result.trim_end_matches('-').to_string()
 }
 
-fn shell_escape(s: &str) -> String {
+pub(crate) fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

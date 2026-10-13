@@ -51,6 +51,13 @@ Categories (tmux session option @category):
   showrunner category clear <session>
   showrunner category list [--json]
 
+Restore (snapshot in ~/.showrunner/snapshot.json, taken by the daemon):
+  showrunner restore [--dry-run] [--file <snapshot.json>]
+                                                recreate missing sessions/windows;
+                                                commands are pasted, not run
+  showrunner closed list [--json]               recently closed windows/sessions
+  showrunner reopen <id>
+
 <session> is a ref from `list` — `<project>/<task>/<session>`, `<project>/<task>`
 for that task's main session, or a raw tmux session name.
 ";
@@ -70,6 +77,9 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("discover") => Some(cmd_discover(rest)),
         Some("hooks") => Some(crate::hooks_install::cmd_hooks(rest)),
         Some("category") => Some(crate::category::cmd_category(rest)),
+        Some("restore") => Some(cmd_restore(rest)),
+        Some("closed") => Some(cmd_closed(rest)),
+        Some("reopen") => Some(cmd_reopen(rest)),
         Some("--help" | "-h" | "help") => {
             print!("{HELP}");
             Some(Ok(()))
@@ -134,7 +144,94 @@ fn cmd_serve(args: &[String]) -> Result<()> {
         .get("bind")
         .cloned()
         .unwrap_or_else(|| "127.0.0.1:7878".to_string());
+    crate::restore::boot(&Config::load().map(|c| c.restore).unwrap_or_default());
     server::run(&bind)
+}
+
+fn print_report(r: &crate::restore::Report) {
+    println!(
+        "restored {} windows, pasted {} commands",
+        r.windows, r.pasted
+    );
+    for e in &r.errors {
+        eprintln!("error: {e}");
+    }
+}
+
+fn cmd_restore(args: &[String]) -> Result<()> {
+    let (positional, flags) = parse_args(args, &["file"], &["dry-run"])?;
+    if let Some(extra) = positional.first() {
+        bail!("unexpected argument '{extra}' (usage: restore [--dry-run] [--file <path>])");
+    }
+    let path = flags
+        .get("file")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::snapshot::snapshot_path);
+    let Some(snap) = crate::snapshot::load(&path) else {
+        bail!("no snapshot at {}", path.display());
+    };
+    if flags.contains_key("dry-run") {
+        let lines = crate::restore::describe(&snap);
+        if lines.is_empty() {
+            println!("nothing to restore: every window exists");
+        }
+        for line in lines {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    let cfg = Config::load().map(|c| c.restore).unwrap_or_default();
+    print_report(&crate::restore::restore(&snap, &cfg, false)?);
+    Ok(())
+}
+
+fn cmd_closed(args: &[String]) -> Result<()> {
+    let (positional, flags) = parse_args(args, &[], &["json"])?;
+    if positional.first().map(String::as_str) != Some("list") || positional.len() > 1 {
+        bail!("usage: showrunner closed list [--json]");
+    }
+    let history = crate::snapshot::load_closed();
+    if flags.contains_key("json") {
+        println!("{}", serde_json::to_string(&history)?);
+        return Ok(());
+    }
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    for e in history.iter().rev() {
+        let what = match e.kind {
+            crate::snapshot::ClosedKind::Session => format!("session {}", e.session.name),
+            crate::snapshot::ClosedKind::Window => {
+                let w = e.session.windows.first();
+                format!(
+                    "window  {}:{} {}",
+                    e.session.name,
+                    w.map_or(0, |w| w.index),
+                    w.map_or("", |w| w.name.as_str())
+                )
+            }
+        };
+        let ago = crate::inventory::format_idle(now.saturating_sub(e.closed_at));
+        let ago = if ago.is_empty() {
+            "<1m".to_string()
+        } else {
+            ago
+        };
+        println!("{:>4}  {ago:>4} ago  {what}", e.id);
+    }
+    Ok(())
+}
+
+fn cmd_reopen(args: &[String]) -> Result<()> {
+    let [id] = args else {
+        bail!("usage: showrunner reopen <id> (see `showrunner closed list`)");
+    };
+    let id: u64 = id
+        .parse()
+        .map_err(|_| anyhow::anyhow!("'{id}' is not an id"))?;
+    let cfg = Config::load().map(|c| c.restore).unwrap_or_default();
+    print_report(&crate::restore::reopen(id, &cfg)?);
+    Ok(())
 }
 
 /// Canonical `<project>/<task>/<session>` ref for a session.

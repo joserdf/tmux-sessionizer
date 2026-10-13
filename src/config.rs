@@ -538,6 +538,9 @@ pub struct Config {
     /// Name agent windows after the agent's session title. A table.
     #[serde(default)]
     pub naming: crate::naming::NamingConfig,
+    /// Snapshot restore (after a reboot, `showrunner restore`, reopen). A table.
+    #[serde(default)]
+    pub restore: crate::restore::RestoreConfig,
 }
 
 /// Root directory for all showrunner data: ~/.showrunner
