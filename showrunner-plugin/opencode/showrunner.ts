@@ -17,8 +17,14 @@ export default async ({ directory }) => {
   const env = (globalThis.process && globalThis.process.env) || {}
   const port = env.SESSIONIZER_PORT || "7878"
 
+  // TMUX_PANE is the daemon's exact correlation key; cwd is the fallback.
+  const pane = env.TMUX_PANE || ""
+
   const post = (type, extra) => {
-    const body = Object.assign({ agent: "opencode", type: type, cwd: directory }, extra || {})
+    const body = Object.assign(
+      { agent: "opencode", type: type, cwd: directory, tmux_pane: pane },
+      extra || {},
+    )
     try {
       fetch("http://127.0.0.1:" + port + "/api/hook", {
         method: "POST",
@@ -33,25 +39,30 @@ export default async ({ directory }) => {
   return {
     event: async ({ event }) => {
       const props = event.properties || {}
+      // The OpenCode session id (`opencode -s <id>` resumes it).
+      const sid = { session_id: props.sessionID || (props.info && props.info.id) || "" }
       switch (event.type) {
         // Session began.
         case "session.created":
-          post("session.start")
+          post("session.start", sid)
           break
         // The agent finished a turn and is idle. `session.status` with
         // type "idle" is the canonical signal; we deliberately ignore the
         // deprecated `session.idle` event (OpenCode still emits it alongside
         // session.status) so the daemon isn't sent a duplicate finish per turn.
         case "session.status":
-          if (props.status && props.status.type === "idle") post("session.finish")
+          if (props.status && props.status.type === "idle") post("session.finish", sid)
           break
         case "session.error":
-          post("session.error", { message: (props.error && props.error.message) || "error" })
+          post("session.error", {
+            ...sid,
+            message: (props.error && props.error.message) || "error",
+          })
           break
         // Only fires when a permission policy is set to ask; showrunner launches
         // opencode with --auto (allow), so this is normally silent.
         case "permission.asked":
-          post("permission.request")
+          post("permission.request", sid)
           break
       }
     },

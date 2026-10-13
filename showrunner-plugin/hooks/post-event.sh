@@ -9,7 +9,7 @@ set +e
 PORT="${SESSIONIZER_PORT:-7878}"
 EV="$(cat || true)"
 python3 - "$PORT" "$EV" <<'PY' 2>/dev/null || true
-import sys, json
+import os, sys, json
 import urllib.request
 
 port = sys.argv[1]
@@ -21,6 +21,9 @@ if not isinstance(ev, dict):
     sys.exit(0)
 
 ev["agent"] = "claude"
+# The pane the agent runs in: the daemon's exact correlation key (cwd is the
+# fallback, which is ambiguous when several agents share a directory).
+ev["tmux_pane"] = os.environ.get("TMUX_PANE", "")
 # The raw payload (including notification_type when present) is forwarded as-is;
 # the daemon normalizes it at the boundary (see hooks::parse_claude_hook).
 

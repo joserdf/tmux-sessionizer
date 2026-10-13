@@ -256,6 +256,8 @@ async fn api_state(State(state): State<Arc<ServerState>>) -> Result<Response, Ap
                         resources: Default::default(),
                         gpu: Default::default(),
                         generation: 0,
+                        panes: Default::default(),
+                        pane_states: Default::default(),
                     };
                     build_state(&cfg, &u, &state.hostname)
                 }
@@ -394,6 +396,8 @@ mod sse_tests {
             resources: Default::default(),
             gpu: Default::default(),
             generation: 0,
+            panes: Default::default(),
+            pane_states: Default::default(),
         };
         let u2 = u.clone();
         assert_eq!(u2.sessions.len(), 0);
@@ -611,30 +615,37 @@ async fn api_hook(
             .ok_or_else(|| bad_request("could not parse codex hook payload"))?,
         other => return Err(bad_request(format!("unknown agent '{other}'"))),
     };
-    let session_id = body
-        .get("session_id")
-        .and_then(Value::as_str)
-        .map(String::from)
-        .unwrap_or_default();
-    // The cwd is the correlation key the worker uses to map the event back to a
-    // tmux session (the agent's session_id is not the tmux name).
-    let cwd = body
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(String::from)
-        .unwrap_or_default();
+    // Empty strings (clients send "" when a value is unknown) count as absent.
+    let field = |key: &str| {
+        body.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    // The worker maps the event back to a pane via `tmux_pane` (exact), falling
+    // back to `cwd`; the agent's session_id is not a tmux name.
+    let delivery = crate::hooks::HookDelivery {
+        tmux_pane: field("tmux_pane"),
+        cwd: field("cwd"),
+        session_id: field("session_id"),
+        event,
+    };
 
     {
         let mut evs = state.hook_events.lock().unwrap();
-        evs.push_back((session_id.clone(), event.clone(), std::time::Instant::now()));
+        evs.push_back((
+            delivery.session_id.clone().unwrap_or_default(),
+            delivery.event.clone(),
+            std::time::Instant::now(),
+        ));
         while evs.len() > 200 {
             evs.pop_front();
         }
     }
     // Feed the authoritative inbox so the worker refines status with zero
     // pane-scrape latency (permission prompt, turn-completed, session-ended).
-    if !cwd.is_empty() {
-        state.worker.hook_inbox.lock().unwrap().push_back((cwd, event));
+    if delivery.tmux_pane.is_some() || delivery.cwd.is_some() {
+        state.worker.hook_inbox.lock().unwrap().push_back(delivery);
     }
     Ok(StatusCode::OK)
 }

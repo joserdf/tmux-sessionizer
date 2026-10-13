@@ -5,7 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::autoclose::{self, AutoCloseConfig, CloseAction};
-use crate::hooks::AgentEvent;
+use crate::hooks::HookDelivery;
+use crate::inventory::{self, Pane, PaneState};
 use crate::resources::SessionResources;
 use crate::tmux::{self, DiffStats, SessionStatus, TmuxSession};
 
@@ -54,6 +55,12 @@ pub struct WorkerUpdate {
     /// Monotonically increasing; bumped on every publish. Lets SSE clients emit
     /// only on change instead of re-sending the identical state each poll.
     pub generation: u64,
+    /// Every pane on the tmux server (all sessions, not only `cm__` ones).
+    #[serde(default)]
+    pub panes: Vec<Pane>,
+    /// Agent state per pane, keyed by pane id (`%3`).
+    #[serde(default)]
+    pub pane_states: HashMap<String, PaneState>,
 }
 
 pub struct Worker {
@@ -66,7 +73,7 @@ pub struct Worker {
     /// `POST /api/hook` and drained by the worker loop to refine status with
     /// zero pane-scrape latency. (cwd, not the agent's session_id, is the
     /// correlation key: it maps back to a tmux session via the records.)
-    pub hook_inbox: Arc<Mutex<VecDeque<(String, AgentEvent)>>>,
+    pub hook_inbox: Arc<Mutex<VecDeque<HookDelivery>>>,
     /// Live connection to the daemon (remote mode). True while the SSE stream
     /// is actively delivering; false when it has dropped. In local mode this is
     /// always true (the worker IS the source). The UI shows a "daemon
@@ -299,6 +306,12 @@ fn parse_sse_frame(frame: &str) -> Option<WorkerUpdate> {
     serde_json::from_str::<WorkerUpdate>(&data).ok()
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// `fallback` marks a remote-mode worker running as the local fallback prober:
 /// it stays idle (no tmux probing) while `connected` is true and takes over
 /// publishing once the daemon stream drops. Fallback runs the dashboard probes
@@ -307,7 +320,7 @@ fn parse_sse_frame(frame: &str) -> Option<WorkerUpdate> {
 fn worker_loop(
     hints: Arc<Mutex<WorkerHints>>,
     latest: Arc<Mutex<Option<WorkerUpdate>>>,
-    hook_inbox: Arc<Mutex<VecDeque<(String, AgentEvent)>>>,
+    hook_inbox: Arc<Mutex<VecDeque<HookDelivery>>>,
     fallback: bool,
     connected: Arc<AtomicBool>,
     last_frame: Arc<Mutex<Instant>>,
@@ -344,6 +357,7 @@ fn worker_loop(
     // Cache of (last_check, dirty) per close candidate, so a blocked (dirty)
     // session isn't re-scanned by `git status` on every auto-close pass.
     let mut dirty_cache: HashMap<String, (Instant, bool)> = HashMap::new();
+    let mut pane_states: HashMap<String, PaneState> = HashMap::new();
 
     // A hung daemon (TCP open, but no frames — a wedged server task) keeps
     // `connected` true and would otherwise freeze the dashboard with no banner.
@@ -364,7 +378,9 @@ fn worker_loop(
             // fall through to local probing below
         }
 
-        let sessions = tmux::list_sessions().unwrap_or_default();
+        let panes = inventory::list_panes();
+        inventory::refresh_states(&mut pane_states, &panes);
+        let sessions = inventory::cm_sessions(&panes);
 
         // Refresh the resource sample before publishing, so both publishes
         // below carry the latest computed values.
@@ -430,12 +446,13 @@ fn worker_loop(
 
         // Apply one-shot authoritative hook overrides. A hook event (e.g. a
         // permission prompt) removes the pane-scrape detection latency so the
-        // state shows on the very next tick. The hook's `cwd` is correlated back
-        // to a tmux session via the records. Consumed here; the pane scrape is
+        // state shows on the very next tick. The event is tied to its pane by
+        // `$TMUX_PANE` (cwd as fallback), which also records the agent's own
+        // session id for resume. Consumed here; the pane scrape is
         // authoritative again on the following tick (it keeps or corrects the
         // state).
         {
-            let pending: Vec<(String, AgentEvent)> = {
+            let pending: Vec<HookDelivery> = {
                 let mut inbox = hook_inbox.lock().unwrap();
                 inbox.drain(..).collect()
             };
@@ -452,9 +469,30 @@ fn worker_loop(
                     };
                     cwd_to_session.insert(cwd, name.clone());
                 }
-                for (cwd, ev) in pending {
-                    let Some(status) = ev.status_hint() else { continue };
-                    let Some(name) = cwd_to_session.get(&cwd).cloned() else { continue };
+                let now = unix_now();
+                for d in pending {
+                    let pane = inventory::resolve_hook_pane(
+                        &panes,
+                        &pane_states,
+                        d.tmux_pane.as_deref(),
+                        d.cwd.as_deref(),
+                    );
+                    if let Some(p) = pane {
+                        let st = pane_states.entry(p.id.clone()).or_default();
+                        if d.session_id.is_some() {
+                            st.agent_session_id = d.session_id.clone();
+                        }
+                        st.last_event = Some(d.event.clone());
+                        st.last_event_at = Some(now);
+                    }
+                    let Some(status) = d.event.status_hint() else {
+                        continue;
+                    };
+                    let name = match pane {
+                        Some(p) => Some(p.session.clone()),
+                        None => d.cwd.as_ref().and_then(|c| cwd_to_session.get(c).cloned()),
+                    };
+                    let Some(name) = name else { continue };
                     if sessions.iter().any(|s| s.name == name) {
                         statuses.insert(name, status);
                     }
@@ -495,6 +533,8 @@ fn worker_loop(
             resources: resources.clone(),
             gpu: gpu.clone(),
             generation,
+            panes: panes.clone(),
+            pane_states: pane_states.clone(),
         });
 
         // Refresh diff stats and terminal counts less frequently (~every 2 seconds)
@@ -600,6 +640,8 @@ fn worker_loop(
             resources: resources.clone(),
             gpu: gpu.clone(),
             generation,
+            panes,
+            pane_states: pane_states.clone(),
         };
 
         *latest.lock().unwrap() = Some(update);
@@ -780,6 +822,8 @@ mod sse_client_tests {
             resources: Default::default(),
             gpu: vec![(4242, 512)],
             generation: 7,
+            panes: Default::default(),
+            pane_states: Default::default(),
         }
     }
 

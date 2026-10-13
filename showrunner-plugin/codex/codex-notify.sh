@@ -15,7 +15,7 @@ set +e
 PORT="${SESSIONIZER_PORT:-7878}"
 EV="${1:-}"
 python3 - "$PORT" "$EV" <<'PY' 2>/dev/null || true
-import sys, json
+import os, sys, json
 import urllib.request
 
 port, ev_raw = sys.argv[1], sys.argv[2]
@@ -26,7 +26,13 @@ except Exception:
 if not isinstance(ev, dict):
     sys.exit(0)
 
-body = {"agent": "codex", "hook": "Stop", "cwd": ev.get("cwd") or ""}
+body = {
+    "agent": "codex",
+    "hook": "Stop",
+    "cwd": ev.get("cwd") or "",
+    "tmux_pane": os.environ.get("TMUX_PANE", ""),
+    "session_id": ev.get("thread-id") or "",
+}
 
 try:
     req = urllib.request.Request(
