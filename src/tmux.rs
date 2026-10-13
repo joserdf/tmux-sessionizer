@@ -835,9 +835,11 @@ pub fn setup_live_pane() -> Option<String> {
         return None;
     }
     // `-p 60`: the new (right) pane gets 60%, the TUI keeps 40% on the left.
+    // `-d` keeps the TUI focused (a split otherwise activates the new pane).
     let out = Command::new("tmux")
         .args([
             "split-window",
+            "-d",
             "-h",
             "-p",
             "60",
