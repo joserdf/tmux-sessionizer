@@ -687,6 +687,12 @@ pub struct SessionRecord {
 }
 
 impl SessionRecord {
+    /// Whether this record belongs to the given project+task. Records persist the
+    /// raw (unsanitized) names, so they're compared as-is.
+    pub fn belongs_to(&self, project_name: &str, task_name: &str) -> bool {
+        self.project_name == project_name && self.task_name == task_name
+    }
+
     pub fn agent_kind(&self) -> crate::agent::AgentKind {
         crate::agent::AgentKind::from_id(&self.agent).unwrap_or_default()
     }
@@ -752,7 +758,7 @@ pub fn remove_task_session_records(project_name: &str, task_name: &str) {
     let _g = IO_LOCK.lock().unwrap();
     let mut sessions = load_sessions();
     let before = sessions.len();
-    sessions.retain(|_, r| !(r.project_name == project_name && r.task_name == task_name));
+    sessions.retain(|_, r| !r.belongs_to(project_name, task_name));
     if sessions.len() < before {
         let _ = save_sessions(&sessions);
     }
@@ -769,10 +775,7 @@ pub fn set_task_session_records_archived(
     let mut sessions = load_sessions();
     let mut changed = false;
     for record in sessions.values_mut() {
-        if record.project_name == project_name
-            && record.task_name == task_name
-            && record.archived != archived
-        {
+        if record.belongs_to(project_name, task_name) && record.archived != archived {
             record.archived = archived;
             changed = true;
         }
@@ -1364,5 +1367,24 @@ mod migration_tests {
         );
         assert_eq!(main_repo_from_gitdir("gitdir: /home/u/proj/.git"), None);
         assert_eq!(main_repo_from_gitdir(""), None);
+    }
+
+    #[test]
+    fn session_record_belongs_to_compares_raw_names() {
+        let record = SessionRecord {
+            project_name: "My Project".into(),
+            project_path: "/tmp/p".into(),
+            task_name: "Fix Bug".into(),
+            task_branch: "fix-bug".into(),
+            session_name: "1".into(),
+            use_worktree: true,
+            archived: false,
+            auto_closed: false,
+            agent: default_agent_id(),
+        };
+        assert!(record.belongs_to("My Project", "Fix Bug"));
+        // Sanitized forms must not match: records persist raw names.
+        assert!(!record.belongs_to("My-Project", "Fix-Bug"));
+        assert!(!record.belongs_to("My Project", "Other"));
     }
 }

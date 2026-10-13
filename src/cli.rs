@@ -171,11 +171,9 @@ fn resolve_session(reference: &str, sessions: &[TmuxSession]) -> Result<TmuxSess
                 "'{reference}' is not a session ref (expected <project>/<task>[/<session>] or a tmux name)"
             ),
         };
-        sessions.iter().find(|s| {
-            s.project_name == tmux::sanitize(project)
-                && s.task_name == tmux::sanitize(task)
-                && s.session_name == tmux::sanitize(session)
-        })
+        sessions
+            .iter()
+            .find(|s| s.belongs_to(project, task) && s.session_name == tmux::sanitize(session))
     };
 
     found.cloned().ok_or_else(|| {

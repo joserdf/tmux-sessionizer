@@ -293,6 +293,12 @@ pub fn extract_difit_comments(stdout: &str) -> Option<String> {
 /// candidate sessions its comments forward to (`(tmux name, display name)`).
 type HunkReview = (String, Vec<String>, Vec<(String, String)>);
 
+/// A session's real agent pane currently swapped into the live right slot.
+pub struct LiveShown {
+    pub session: String,
+    pub pane: String,
+}
+
 /// Detail-pane cache for the currently-selected session: the trimmed latest
 /// output (the "final texts") and the worktree diff, fetched on a short timer so
 /// the UI thread stays responsive. Kept per-session so switching selection
@@ -412,14 +418,8 @@ pub struct App {
     /// Id of the placeholder pane created on launch in the right slot.
     /// `Some` means live mode is active.
     pub live_pane: Option<String>,
-    /// Id of the pane the TUI itself runs in (from `$TMUX_PANE`). Re-selecting it
-    /// after a `swap-pane` keeps focus on the sidebar so Enter only *shows* a
-    /// session without stealing focus into the agent pane.
-    pub tui_pane: Option<String>,
-    /// Session name whose real pane is currently swapped into the right slot.
-    pub live_showing: Option<String>,
-    /// Agent pane ID currently sitting in our right slot.
-    pub live_showing_pane: Option<String>,
+    /// Session whose real pane is currently swapped into the right slot.
+    pub live_showing: Option<LiveShown>,
     /// Show a session's real terminal in the live pane (set by Enter / Right).
     pub should_show_live: Option<String>,
     /// Focus the tmux cursor into the live pane so the user can interact with
@@ -744,9 +744,7 @@ impl App {
             should_attach: None,
             should_attach_window: None,
             live_pane: None,
-            tui_pane: None,
             live_showing: None,
-            live_showing_pane: None,
             should_show_live: None,
             should_focus_live: false,
             should_review_hunk: None,
@@ -1304,18 +1302,19 @@ impl App {
     /// Restore any currently displayed agent pane back to its original session,
     /// bringing our placeholder pane back to the right slot.
     pub fn restore_live_pane(&mut self) {
-        if let (Some(shown_pane), Some(placeholder)) =
-            (self.live_showing_pane.take(), &self.live_pane)
-        {
-            let _ = crate::tmux::swap_panes(&shown_pane, placeholder);
-            self.live_showing = None;
+        if let (Some(shown), Some(placeholder)) = (self.live_showing.take(), &self.live_pane) {
+            let _ = crate::tmux::swap_panes(&shown.pane, placeholder);
         }
     }
 
     /// Display `session_name` in the live right slot via `swap-pane`. Non-nested
     /// and warning-free because it physically moves the agent's pane.
     pub fn show_live_session(&mut self, session_name: &str) {
-        if self.live_showing.as_deref() == Some(session_name) {
+        if self
+            .live_showing
+            .as_ref()
+            .is_some_and(|s| s.session == session_name)
+        {
             return;
         }
         let Some(placeholder) = self.live_pane.clone() else {
@@ -1329,14 +1328,10 @@ impl App {
         if let Ok(target_pane) = crate::tmux::get_session_active_pane(session_name)
             && crate::tmux::swap_panes(&placeholder, &target_pane).is_ok()
         {
-            self.live_showing = Some(session_name.to_string());
-            self.live_showing_pane = Some(target_pane);
-            // swap-pane makes the moved-in agent pane active, stealing focus from
-            // the sidebar. Re-select the TUI pane so Enter/Right only *show* the
-            // session; the user explicitly enters it with Tab / view_live.
-            if let Some(tui) = &self.tui_pane {
-                let _ = crate::tmux::focus_pane(tui);
-            }
+            self.live_showing = Some(LiveShown {
+                session: session_name.to_string(),
+                pane: target_pane,
+            });
         }
     }
 
@@ -1724,7 +1719,7 @@ impl App {
             let mut recreated = 0;
             let mut failed = 0;
             for (tmux_name, record) in &records {
-                if record.project_name == project_name && record.task_name == task_name {
+                if record.belongs_to(&project_name, &task_name) {
                     match tmux::recreate_session(tmux_name, record) {
                         Ok(_) => {
                             // Unarchiving re-activates the task: clear any

@@ -48,7 +48,6 @@ pub fn run() -> Result<()> {
     // Inside tmux, set up the live master-detail split (sidebar left, the
     // selected agent's real terminal right). Outside tmux the rendered
     // full-screen master-detail is the fallback.
-    app.tui_pane = std::env::var("TMUX_PANE").ok();
     app.live_pane = tmux::setup_live_pane();
 
     loop {
@@ -509,7 +508,12 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         }
         if app.should_focus_live {
             app.should_focus_live = false;
-            if let Some(pane) = app.live_showing_pane.clone().or_else(|| app.live_pane.clone()) {
+            if let Some(pane) = app
+                .live_showing
+                .as_ref()
+                .map(|s| s.pane.clone())
+                .or_else(|| app.live_pane.clone())
+            {
                 tmux::focus_pane(&pane)?;
             }
         }

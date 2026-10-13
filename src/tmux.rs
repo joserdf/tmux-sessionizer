@@ -47,6 +47,12 @@ pub struct TmuxSession {
 }
 
 impl TmuxSession {
+    /// Whether this session belongs to the given raw (unsanitized) project+task.
+    /// Session names carry sanitized parts, so the inputs are sanitized here.
+    pub fn belongs_to(&self, project_name: &str, task_name: &str) -> bool {
+        self.project_name == sanitize(project_name) && self.task_name == sanitize(task_name)
+    }
+
     /// Parse a tmux session name like `cm__project__task__session`.
     pub fn from_tmux_name(name: &str) -> Option<Self> {
         let rest = name.strip_prefix("cm")?;
@@ -867,12 +873,13 @@ pub fn get_session_active_pane(session_name: &str) -> Result<String> {
     Ok(pane_id)
 }
 
-/// Swap two panes natively using `tmux swap-pane -s src -t dst`. This moves the
+/// Swap two panes natively using `tmux swap-pane -d -s src -t dst`. This moves the
 /// real agent pane into the TUI window's right slot without creating a nested
-/// client or showing nesting warnings.
+/// client or showing nesting warnings. `-d` keeps the active pane unchanged, so
+/// showing a session never steals focus from the sidebar.
 pub fn swap_panes(src_pane: &str, dst_pane: &str) -> Result<()> {
     let status = Command::new("tmux")
-        .args(["swap-pane", "-s", src_pane, "-t", dst_pane])
+        .args(["swap-pane", "-d", "-s", src_pane, "-t", dst_pane])
         .status()?;
     if !status.success() {
         bail!("tmux swap-pane failed between {src_pane} and {dst_pane}");
@@ -2436,7 +2443,7 @@ pub fn get_pr_url(project_path: &str, branch: &str) -> Option<String> {
 pub fn next_session_number(project_name: &str, task_name: &str, sessions: &[TmuxSession]) -> u32 {
     let max = sessions
         .iter()
-        .filter(|s| s.project_name == project_name && s.task_name == task_name)
+        .filter(|s| s.belongs_to(project_name, task_name))
         .filter_map(|s| s.session_name.parse::<u32>().ok())
         .max()
         .unwrap_or(0);
@@ -2450,7 +2457,7 @@ pub fn sessions_for_task(
 ) -> Vec<TmuxSession> {
     let mut task_sessions: Vec<TmuxSession> = sessions
         .iter()
-        .filter(|s| s.project_name == sanitize(project_name) && s.task_name == sanitize(task_name))
+        .filter(|s| s.belongs_to(project_name, task_name))
         .cloned()
         .collect();
     // The main session always sorts first.
@@ -2491,15 +2498,10 @@ pub fn delete_task(
         let _ = kill_session(&session.name);
     }
 
-    // Also clean up any orphaned session records (tmux session already dead).
-    // Session records persist the raw project/task names (see add_session_record),
-    // so compare against the raw inputs, not their sanitized forms.
+    // Also clean up any orphaned session records (tmux session already dead)
     let records = crate::config::load_sessions();
     for (tmux_name, record) in &records {
-        if record.project_name == project_name
-            && record.task_name == task_name
-            && !live_names.contains(tmux_name.as_str())
-        {
+        if record.belongs_to(project_name, task_name) && !live_names.contains(tmux_name.as_str()) {
             // This record's tmux session is dead — clean up its worktree and branch
             let wt_path = worktree_dir(
                 &record.project_name,
@@ -2842,24 +2844,32 @@ mod tests {
 
     #[test]
     fn sessions_for_task_matches_sanitized_names_and_orders_main_first() {
-        // Live TmuxSessions carry sanitized project/task names (sanitize keeps
-        // case and maps spaces to hyphens), so a raw project "My Project" maps
-        // to "My-Project".
-        let sessions = vec![
-            TmuxSession::from_tmux_name("cm__My-Project__Fix-Bug__2").unwrap(),
-            TmuxSession::from_tmux_name("cm__My-Project__Fix-Bug__main").unwrap(),
-            TmuxSession::from_tmux_name("cm__My-Project__Other-Task__1").unwrap(),
-            TmuxSession::from_tmux_name("cm__Other-Project__Fix-Bug__1").unwrap(),
-        ];
-        let task_sessions = sessions_for_task("My Project", "Fix Bug", &sessions);
-        assert_eq!(task_sessions.len(), 2);
-        // The main session always sorts first.
-        assert!(is_main_session(&task_sessions[0].session_name));
-        // Only sessions of the exact project+task match.
-        for s in &task_sessions {
-            assert_eq!(s.project_name, "My-Project");
-            assert_eq!(s.task_name, "Fix-Bug");
-        }
+        // Live TmuxSessions carry sanitized names; callers pass raw ones.
+        let sessions: Vec<TmuxSession> = [
+            ("My Project", "Fix Bug", "2"),
+            ("My Project", "Fix Bug", "main"),
+            ("My Project", "Other Task", "1"),
+            ("Other Project", "Fix Bug", "1"),
+        ]
+        .iter()
+        .map(|(p, t, s)| TmuxSession::from_tmux_name(&build_tmux_name(p, t, s)).unwrap())
+        .collect();
+        let names: Vec<String> = sessions_for_task("My Project", "Fix Bug", &sessions)
+            .into_iter()
+            .map(|s| s.session_name)
+            .collect();
+        assert_eq!(names, ["main", "2"]);
+    }
+
+    #[test]
+    fn next_session_number_matches_raw_names() {
+        let sessions: Vec<TmuxSession> = ["main", "1", "2"]
+            .iter()
+            .map(|s| {
+                TmuxSession::from_tmux_name(&build_tmux_name("My Project", "Fix Bug", s)).unwrap()
+            })
+            .collect();
+        assert_eq!(next_session_number("My Project", "Fix Bug", &sessions), 3);
     }
 
     #[test]
