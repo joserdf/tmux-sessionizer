@@ -20,6 +20,8 @@ showrunner — TUI for managing coding agent sessions
 
 Usage:
   showrunner                                    launch the TUI
+  showrunner sessions                           sessions and windows by category,
+                                                with agent status (popup view)
   showrunner serve [--bind <addr:port>]         serve the mobile web UI
                                                     (default 127.0.0.1:7878)
 
@@ -85,6 +87,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("closed") => Some(cmd_closed(rest)),
         Some("reopen") => Some(cmd_reopen(rest)),
         Some("mcp") => Some(crate::mcp::run()),
+        Some("sessions") => Some(crate::sessions_view::run()),
         Some("--help" | "-h" | "help") => {
             print!("{HELP}");
             Some(Ok(()))

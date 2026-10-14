@@ -122,6 +122,26 @@ Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
 - `showrunner` CLI to manage and talk to sessions from inside one
   (`list`, `task`, `session`, `ask`, `send`, `output`, `discover`)
 
+## Sessions view
+
+`showrunner sessions` lists every tmux session and window as a tree,
+*category ▸ session ▸ window*, with each window's agent, status and idle time.
+Statuses are `● working`, `? question`, `! permission`, `✓ done` (finished, not
+seen yet), `○ idle` and `✗ error`. Uncategorized sessions go last. The plugin
+binds it to `Alt+S` as a popup.
+
+- **Move:** `j`/`k`, `Enter` switches to the window, `n` jumps to the next one
+  needing you, `/` filters, `a` toggles attention-only.
+- **Act:**
+  - `r` reply, `y` approve a permission, `s` suspend the agent
+  - `c` set the category, `R` rename
+  - `x` close (asks first; reopenable), `u` reopen from the recently closed list
+- **Other:** `p` opens the projects TUI, `q` quits.
+
+When the terminal is wider than 140 columns, the selected window's output is
+shown on the right. The actions are the MCP tools' (below), so the same rules
+apply.
+
 ## MCP server
 
 `showrunner mcp` is an MCP server on stdio. It lets a coding agent see and

@@ -18,6 +18,7 @@ pub mod resources;
 pub mod restore;
 pub mod search;
 pub mod server;
+pub mod sessions_view;
 pub mod snapshot;
 pub mod suspend;
 pub mod theme;

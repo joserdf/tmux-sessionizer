@@ -311,6 +311,21 @@ args and grouping keys). Sessions are addressed as `=name:` so `gate` never matc
 6. Binding: ship the Rust TUI on `Alt+S` while the old bash picker keeps `Alt+s`. Swap only when
    the user approves.
 
+**As built:**
+- A standalone view, at the user's choice, instead of new `ListItem` variants in the 3,800-line
+  `App`. `src/sessions_view.rs`: `showrunner sessions`, about 800 lines plus tests. The old TUI
+  stays behind `showrunner` and `p`.
+- State: a background thread sends a fresh `control::Inventory` once a second (`list-panes`
+  plus the daemon's `/api/v2/pane-states`, as for the MCP server). The first frame doesn't wait
+  for it.
+- Actions call the `Inventory` methods the MCP tools use, on short-lived threads. Results go to
+  the status line and wake the refresher. `x` asks first.
+- Keys as planned, plus `s` (suspend). `Ctrl`/`Alt` combinations are ignored, except `Ctrl+C`,
+  which quits.
+- The preview is the selected window's capture with trailing blank lines dropped. It shows only
+  when the body is wider than 140 columns.
+- `sessionizer.tmux` binds `Alt+S` to the view in a popup.
+
 ## Edge cases and risks
 
 - **Several agents in one window**: the window aggregates the worst status; naming uses the

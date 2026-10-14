@@ -75,7 +75,7 @@ impl Inventory {
         Self::new(inventory::list_panes(), states)
     }
 
-    fn state(&self, pane: &Pane) -> Option<&PaneState> {
+    pub(crate) fn state(&self, pane: &Pane) -> Option<&PaneState> {
         self.states.get(&pane.id)
     }
 
@@ -88,7 +88,7 @@ impl Inventory {
     }
 
     /// A window's status: the most urgent of its panes'.
-    fn window_status(&self, window_id: &str) -> Option<AgentStatus> {
+    pub(crate) fn window_status(&self, window_id: &str) -> Option<AgentStatus> {
         self.window_panes(window_id)
             .filter_map(|p| self.status(p))
             .max()

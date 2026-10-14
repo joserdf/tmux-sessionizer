@@ -218,7 +218,7 @@ fn port() -> u16 {
 }
 
 /// Agent states from the daemon; `None` when it isn't running.
-async fn daemon_states() -> Option<HashMap<String, PaneState>> {
+pub(crate) async fn daemon_states() -> Option<HashMap<String, PaneState>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()

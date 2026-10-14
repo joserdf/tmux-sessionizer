@@ -29,6 +29,9 @@ SESSIONIZER_BIN_ESC=$(printf '%q' "$SESSIONIZER_BIN")
 # Alt+s: open the TUI in a popup (popup exits when the TUI exits).
 tmux bind-key -n M-s display-popup -w 90% -h 90% -E "$SESSIONIZER_BIN_ESC" 2>/dev/null || true
 
+# Alt+S: the sessions view (sessions and windows by category, agent status).
+tmux bind-key -n M-S display-popup -w 90% -h 90% -E "$SESSIONIZER_BIN_ESC sessions" 2>/dev/null || true
+
 # Alt+n: quick access to the TUI (new/switch sessions) in a popup.
 tmux bind-key -n M-n display-popup -w 90% -h 90% -E "$SESSIONIZER_BIN_ESC" 2>/dev/null || true
 
