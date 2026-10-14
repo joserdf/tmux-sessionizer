@@ -456,6 +456,22 @@ fn write_action(written: Option<&Snapshot>, cur: &Snapshot, first: bool) -> Writ
     }
 }
 
+/// A snapshot taken now, outside the tracker (the MCP server's `close`).
+pub fn take(
+    panes: &[Pane],
+    states: &HashMap<String, PaneState>,
+    redact: &[String],
+    now: u64,
+) -> Snapshot {
+    let mut env = HashMap::new();
+    for pane in panes {
+        if pane.session.starts_with("cm__") && !env.contains_key(&pane.session) {
+            env.insert(pane.session.clone(), session_env(&pane.session));
+        }
+    }
+    build(panes, states, &env, pane_argv, redact, now)
+}
+
 /// `CM_*` variables of a session's tmux environment.
 fn session_env(session: &str) -> Vec<(String, String)> {
     let Ok(out) = Command::new("tmux")
@@ -568,8 +584,11 @@ impl Tracker {
             let closed = closed_between(prev, &cur);
             if !closed.is_empty() {
                 let mut history = load_closed();
-                record_closed(&mut history, closed, CloseReason::Manual, now);
-                let _ = save_closed(&history);
+                let closed = not_yet_recorded(closed, &history, now);
+                if !closed.is_empty() {
+                    record_closed(&mut history, closed, CloseReason::Manual, now);
+                    let _ = save_closed(&history);
+                }
             }
         }
         let action = write_action(self.written.as_ref(), &cur, self.first);
@@ -580,52 +599,95 @@ impl Tracker {
         self.prev = Some(cur);
     }
 
-    /// Close `targets`, each archived in the closed history first so it can
-    /// always be reopened. A target missing from the last snapshot (none
-    /// yet, or a restore is running) is left open; one tmux fails to close is
-    /// dropped from the history again. Returns each closed target with its
-    /// history id.
+    /// Close `targets`, archived first (see [`archive_and_close`]) from the
+    /// last snapshot; a target missing from it (none yet, or a restore is
+    /// running) is left open. Taken out of that snapshot, so the next tick
+    /// doesn't record them again.
     pub fn close(
         &mut self,
         targets: Vec<Target>,
         reason: CloseReason,
         now: u64,
     ) -> Vec<(Target, u64)> {
-        let Some(prev) = self.prev.as_mut() else {
-            return Vec::new();
-        };
-        // Taken out of `prev`, so the next tick doesn't record them again.
-        let (targets, entries): (Vec<Target>, Vec<_>) = targets
-            .into_iter()
-            .filter_map(|t| take_target(prev, &t).map(|e| (t, e)))
-            .unzip();
-        if targets.is_empty() {
-            return Vec::new();
+        match self.prev.as_mut() {
+            Some(prev) => archive_and_close(prev, targets, reason, now),
+            None => Vec::new(),
         }
-        let mut history = load_closed();
-        let ids = record_closed(&mut history, entries, reason, now);
-        if save_closed(&history).is_err() {
-            return Vec::new();
-        }
-        let mut closed = Vec::new();
-        let mut failed = Vec::new();
-        for (target, id) in targets.into_iter().zip(ids) {
-            let ok = Command::new("tmux")
-                .args(kill_args(&target))
-                .output()
-                .is_ok_and(|o| o.status.success());
-            if ok {
-                closed.push((target, id));
-            } else {
-                failed.push(id);
-            }
-        }
-        if !failed.is_empty() {
-            history.retain(|e| !failed.contains(&e.id));
-            let _ = save_closed(&history);
-        }
-        closed
     }
+}
+
+/// Close `targets`, each taken out of `snap` and archived in the closed
+/// history first so it can always be reopened. A target not in `snap` is left
+/// open; one tmux fails to close is dropped from the history again. Returns
+/// each closed target with its history id.
+pub fn archive_and_close(
+    snap: &mut Snapshot,
+    targets: Vec<Target>,
+    reason: CloseReason,
+    now: u64,
+) -> Vec<(Target, u64)> {
+    let (targets, entries): (Vec<Target>, Vec<_>) = targets
+        .into_iter()
+        .filter_map(|t| take_target(snap, &t).map(|e| (t, e)))
+        .unzip();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let mut history = load_closed();
+    let ids = record_closed(&mut history, entries, reason, now);
+    if save_closed(&history).is_err() {
+        return Vec::new();
+    }
+    let mut closed = Vec::new();
+    let mut failed = Vec::new();
+    for (target, id) in targets.into_iter().zip(ids) {
+        let ok = Command::new("tmux")
+            .args(kill_args(&target))
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if ok {
+            closed.push((target, id));
+        } else {
+            failed.push(id);
+        }
+    }
+    if !failed.is_empty() {
+        history.retain(|e| !failed.contains(&e.id));
+        let _ = save_closed(&history);
+    }
+    closed
+}
+
+/// Seconds during which a window archived by another process (an MCP
+/// `close`) counts as already recorded when the tracker sees it vanish.
+const RECENTLY_ARCHIVED: u64 = 120;
+
+/// `closed` without the windows already archived in `history` within
+/// [`RECENTLY_ARCHIVED`] (same session name and window id).
+fn not_yet_recorded(
+    closed: Vec<(ClosedKind, SessionSnap)>,
+    history: &[ClosedEntry],
+    now: u64,
+) -> Vec<(ClosedKind, SessionSnap)> {
+    let recent: HashSet<(&str, &str)> = history
+        .iter()
+        .filter(|e| now.saturating_sub(e.closed_at) < RECENTLY_ARCHIVED)
+        .flat_map(|e| {
+            e.session
+                .windows
+                .iter()
+                .map(|w| (e.session.name.as_str(), w.id.as_str()))
+        })
+        .collect();
+    closed
+        .into_iter()
+        .filter_map(|(kind, mut s)| {
+            let name = s.name.clone();
+            s.windows
+                .retain(|w| !recent.contains(&(name.as_str(), w.id.as_str())));
+            (!s.windows.is_empty()).then_some((kind, s))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -815,6 +877,38 @@ mod tests {
         assert_eq!(
             kill_args(&Target::Session("b".into())).join(" "),
             "kill-session -t =b"
+        );
+    }
+
+    #[test]
+    fn recently_archived_windows_are_not_recorded_twice() {
+        let panes = [
+            pane("a", "@1", 0, 0, "%1"),
+            pane("a", "@2", 1, 0, "%2"),
+            pane("b", "@3", 0, 0, "%3"),
+        ];
+        let prev = snap(&panes);
+        let mut history = Vec::new();
+        let mut archived = prev.sessions[0].clone();
+        archived.windows.truncate(1);
+        record_closed(
+            &mut history,
+            vec![(ClosedKind::Window, archived)],
+            CloseReason::Manual,
+            100,
+        );
+        // @1 (archived) and the whole of b vanished.
+        let gone = closed_between(&prev, &snap(&panes[1..2]));
+        let left = not_yet_recorded(gone.clone(), &history, 150);
+        let names: Vec<_> = left
+            .iter()
+            .map(|(k, s)| (*k, s.name.as_str(), s.windows[0].id.as_str()))
+            .collect();
+        assert_eq!(names, [(ClosedKind::Session, "b", "@3")]);
+        // Long after, the same ids (a new tmux server) are new closes.
+        assert_eq!(
+            not_yet_recorded(gone, &history, 100 + RECENTLY_ARCHIVED).len(),
+            2
         );
     }
 
