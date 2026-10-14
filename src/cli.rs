@@ -58,6 +58,10 @@ Restore (snapshot in ~/.showrunner/snapshot.json, taken by the daemon):
   showrunner closed list [--json]               recently closed windows/sessions
   showrunner reopen <id>
 
+MCP server (lets a coding agent list, read, message and manage sessions):
+  showrunner mcp                                serve on stdio, e.g.
+                                                `claude mcp add showrunner -- showrunner mcp`
+
 <session> is a ref from `list` — `<project>/<task>/<session>`, `<project>/<task>`
 for that task's main session, or a raw tmux session name.
 ";
@@ -80,6 +84,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("restore") => Some(cmd_restore(rest)),
         Some("closed") => Some(cmd_closed(rest)),
         Some("reopen") => Some(cmd_reopen(rest)),
+        Some("mcp") => Some(crate::mcp::run()),
         Some("--help" | "-h" | "help") => {
             print!("{HELP}");
             Some(Ok(()))

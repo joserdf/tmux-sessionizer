@@ -149,7 +149,12 @@ fn stop_agent(pane: &Pane) -> bool {
 /// Suspend one agent: stop it, mark the pane with what it ran (so snapshots
 /// keep it and it isn't suspended again) and paste the resume command.
 /// Returns the pasted command.
-fn suspend(pane: &Pane, kind: AgentKind, session_id: &str, redact: &[String]) -> Option<String> {
+pub fn suspend(
+    pane: &Pane,
+    kind: AgentKind,
+    session_id: &str,
+    redact: &[String],
+) -> Option<String> {
     let argv = snapshot::pane_argv(pane).map(|a| snapshot::redact_argv(&a, redact));
     let agent = AgentResume {
         kind: kind.id().to_string(),

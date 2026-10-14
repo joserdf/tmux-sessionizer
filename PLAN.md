@@ -246,6 +246,53 @@ args and grouping keys). Sessions are addressed as `=name:` so `gate` never matc
    `[mcp] read_only = false`. The daemon stays bound to `127.0.0.1`.
 4. Docs: `claude mcp add sessionizer -- showrunner mcp` (+ OpenCode/Codex equivalents).
 
+**As built (no v2 action endpoints: the MCP process drives tmux itself):**
+- `showrunner mcp` (`src/mcp.rs`, `rmcp` over stdio). Each tool call lists panes fresh and gets
+  agent state from the daemon's only new endpoint, `GET /api/v2/pane-states` (a clone of the
+  worker's latest tick). Without the daemon, it falls back to local agent detection, with no
+  statuses. The logic lives in `src/control.rs`, which is synchronous and unit-tested; the tools
+  run it on blocking threads and return JSON.
+- 21 tools.
+  - Read: `whoami`, `list_sessions(category?, status?)`, `list_windows(session?)`,
+    `get_status`, `read_output(lines ≤ 500)`, `wait_for_status(statuses?, timeout ≤ 600)`,
+    `list_closed`, `read_diff`, `search_sessions(query, limit)`.
+  - Act: `send_message(submit, force)`, `send_keys`, `approve(yes|always|no)`, `answer(choice)`,
+    `create_session`, `create_window`, `rename`, `set_category`, `close(confirm)`, `reopen`,
+    `suspend(force)`, `resume`.
+  - The reading tools carry `readOnlyHint`; `close` and `suspend` carry `destructiveHint`.
+- Targets: `session` (its active window), `session:window` (index, name or `@id`) or `%pane`. A
+  window resolves to its agent pane (the active one if several), else its active pane. `close`
+  and `rename` act on the session for a bare session target, else on the window.
+- Safety:
+  - `send_message`, `send_keys`, `approve`/`answer` and `suspend` refuse the caller's own pane
+    (`TMUX_PANE`); `close` refuses the session or window that holds it.
+  - `send_message` refuses a `Working` agent unless `force`.
+  - `approve`/`answer` need a `Question`/`Permission` status.
+  - `suspend` refuses busy or waiting agents unless `force`.
+  - `close` needs `confirm: true`.
+  - `[mcp] read_only = true` refuses every action.
+- `approve`/`answer` parse the last run of numbered options on screen (`❯ 1. Yes`, framed in
+  `│`), send the option's digit and return the screen after it. OpenCode's dialogs aren't
+  numbered, so they're unsupported (use `send_keys`).
+- `close` archives the target from a fresh snapshot (`snapshot::take` +
+  `snapshot::archive_and_close`, shared with the tracker), so `reopen` brings it back. The
+  daemon's tracker skips windows already archived in the last 120 s (same session name and
+  window id), so an MCP close isn't recorded twice.
+- `create_session`/`create_window` paste the agent command at the new shell's prompt and run it,
+  so the shell stays when the agent exits. Agents start with their yolo flags
+  (`tmux::build_agent_command`). A named window gets `@sessionizer_autoname off`, as does a
+  renamed one.
+- `search_sessions`: word ranking with no new dependencies.
+  - Weights: names, agent title and transcript title 4; branch and category 3; cwd 2; the last
+    200 lines of output and the transcript 1. A word the term only starts counts half, and the
+    score scales with the share of terms found.
+  - Results come with the best-matching line as a snippet.
+  - Transcripts: Claude `~/.claude/projects/*/<id>.jsonl` (custom title, user and assistant
+    text) and Codex `~/.codex/sessions/**/rollout-*-<id>.jsonl` (user and agent messages),
+    reading the last 8 MB.
+  - OpenCode (SQLite) and Pi (no id) aren't searched by transcript.
+- `wait_for_status` polls every second, and fails after 10 s if the target shows no status at all.
+
 ### Phase 7 — Light TUI: the "Sessions" view (depends on 1–5)
 
 1. **`src/ui_sessions.rs`** (new, keeps `src/ui.rs` from growing past 2120 lines): a tree

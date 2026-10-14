@@ -544,6 +544,9 @@ pub struct Config {
     /// Stop idle agents and paste their resume command. A table.
     #[serde(default)]
     pub auto_suspend: crate::suspend::SuspendConfig,
+    /// The MCP server (`showrunner mcp`). A table.
+    #[serde(default)]
+    pub mcp: crate::mcp::McpConfig,
 }
 
 /// Root directory for all showrunner data: ~/.showrunner

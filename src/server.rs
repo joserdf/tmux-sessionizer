@@ -78,6 +78,7 @@ pub fn run(bind: &str) -> Result<()> {
         .route("/api/hook", post(api_hook))
         .route("/api/hook-events", get(api_hook_events))
         .route("/api/v2/sessions/{name}/category", post(api_set_category))
+        .route("/api/v2/pane-states", get(api_pane_states))
         .with_state(state);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -579,6 +580,19 @@ async fn api_kill(Path(name): Path<String>) -> Result<StatusCode, ApiError> {
         .map_err(internal)?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Per-pane agent state (agent, status, session id) keyed by pane id, from the
+/// worker's latest tick. Clients list panes themselves (fresher than a tick).
+async fn api_pane_states(State(state): State<Arc<ServerState>>) -> Response {
+    for _ in 0..3 {
+        // `api_state` takes the update; the next tick puts one back.
+        if let Some(u) = state.worker.latest.lock().unwrap().clone() {
+            return axum::Json(u.pane_states).into_response();
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    (StatusCode::SERVICE_UNAVAILABLE, "worker has no state yet").into_response()
 }
 
 #[derive(Deserialize)]

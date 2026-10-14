@@ -122,6 +122,48 @@ Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
 - `showrunner` CLI to manage and talk to sessions from inside one
   (`list`, `task`, `session`, `ask`, `send`, `output`, `discover`)
 
+## MCP server
+
+`showrunner mcp` is an MCP server on stdio. It lets a coding agent see and
+drive every tmux session on the machine, other agents included. Register it
+in each agent:
+
+```sh
+claude mcp add showrunner -- showrunner mcp
+codex mcp add showrunner -- showrunner mcp
+```
+
+For OpenCode, add this to `~/.config/opencode/opencode.json`:
+
+```json
+{ "mcp": { "showrunner": { "type": "local", "command": ["showrunner", "mcp"] } } }
+```
+
+Targets are `session`, `session:window` (index, name or `@id`) or `%pane`.
+A window resolves to its agent pane.
+
+- **Read:**
+  - `whoami`, `list_sessions(category?, status?)`, `list_windows(session?)`
+  - `get_status(target)`: includes the options of a pending question or permission.
+  - `read_output(target, lines)`, `read_diff(target)`, `list_closed`
+  - `wait_for_status(target, statuses?, timeout?)`
+  - `search_sessions(query)`: ranks windows by the query's words in their names,
+    agent title, category, branch, cwd, recent output and the agent's transcript
+    (Claude, Codex).
+- **Act:**
+  - `send_message`, `send_keys`, `approve(yes|always|no)`, `answer(choice)`
+  - `create_session`, `create_window`, `rename`, `set_category`
+  - `close` (archived first, so it's reopenable), `reopen(id)`
+  - `suspend` (stop the agent, paste its resume command), `resume`
+
+Agent statuses come from the daemon. Without the daemon, only which agent runs
+where is known.
+
+The caller's own pane is protected: `send_message`, `send_keys`, `close` and
+`suspend` refuse it. `send_message` also refuses a working agent unless
+`force`, and `close` needs `confirm: true`. Set `[mcp] read_only = true` in
+`~/.showrunner/config.toml` to allow only the reading tools.
+
 ## Configuration
 
 - State: `~/.showrunner/` (projects, tasks, session records, worktrees)

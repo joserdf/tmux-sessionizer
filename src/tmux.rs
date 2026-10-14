@@ -656,7 +656,11 @@ pub fn recreate_session(tmux_name: &str, record: &crate::config::SessionRecord) 
 static SEND_TEXT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn send_text(session_name: &str, text: &str, submit: bool) -> Result<()> {
-    let target = format!("{session_name}:0");
+    paste_text(&format!("{session_name}:0"), text, submit)
+}
+
+/// [`send_text`] into any tmux target (`%pane`, `session:window`, …).
+pub fn paste_text(target: &str, text: &str, submit: bool) -> Result<()> {
     let buf_name = format!("cm_paste_{}", SEND_TEXT_SEQ.fetch_add(1, Ordering::Relaxed));
 
     let mut child = Command::new("tmux")
@@ -679,7 +683,7 @@ pub fn send_text(session_name: &str, text: &str, submit: bool) -> Result<()> {
 
     // -p: bracketed paste, -d: delete buffer after a *successful* paste.
     let out = match Command::new("tmux")
-        .args(["paste-buffer", "-d", "-p", "-b", buf_name.as_str(), "-t", &target])
+        .args(["paste-buffer", "-d", "-p", "-b", buf_name.as_str(), "-t", target])
         .output()
     {
         Ok(out) => out,
@@ -699,7 +703,7 @@ pub fn send_text(session_name: &str, text: &str, submit: bool) -> Result<()> {
 
     if submit {
         let out = Command::new("tmux")
-            .args(["send-keys", "-t", &target, "Enter"])
+            .args(["send-keys", "-t", target, "Enter"])
             .output()?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1148,7 +1152,7 @@ pub fn session_agent(session_name: &str) -> AgentKind {
 /// sessions, absent for adhoc ones; for Claude it also implies loading the
 /// showrunner plugin. Agents without a system-prompt flag get it prepended to
 /// the first message instead.
-fn build_agent_command(
+pub(crate) fn build_agent_command(
     agent: AgentKind,
     work_dir: &str,
     system_prompt: Option<&str>,
