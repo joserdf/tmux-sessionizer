@@ -14,6 +14,8 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::autoclose::Target;
+
 use crate::inventory::{self, Pane, PaneState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -295,6 +297,7 @@ pub enum ClosedKind {
 #[serde(rename_all = "snake_case")]
 pub enum CloseReason {
     Manual,
+    AutoClose,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -344,15 +347,17 @@ pub fn closed_between(prev: &Snapshot, cur: &Snapshot) -> Vec<(ClosedKind, Sessi
 }
 
 /// Append closed targets to the history, then keep the newest
-/// [`CLOSED_MAX`] entries younger than [`CLOSED_MAX_AGE`].
+/// [`CLOSED_MAX`] entries younger than [`CLOSED_MAX_AGE`]. Returns the new
+/// entries' ids, in order.
 pub fn record_closed(
     history: &mut Vec<ClosedEntry>,
     closed: Vec<(ClosedKind, SessionSnap)>,
     reason: CloseReason,
     now: u64,
-) {
+) -> Vec<u64> {
     let last = history.iter().map(|e| e.id).max().unwrap_or(0);
-    for (id, (kind, session)) in (last + 1..).zip(closed) {
+    let ids: Vec<u64> = (last + 1..).take(closed.len()).collect();
+    for (&id, (kind, session)) in ids.iter().zip(closed) {
         history.push(ClosedEntry {
             id,
             kind,
@@ -364,6 +369,34 @@ pub fn record_closed(
     history.retain(|e| now.saturating_sub(e.closed_at) < CLOSED_MAX_AGE);
     let excess = history.len().saturating_sub(CLOSED_MAX);
     history.drain(..excess);
+    ids
+}
+
+/// Take `target` out of `snap`, as a closed-history entry.
+fn take_target(snap: &mut Snapshot, target: &Target) -> Option<(ClosedKind, SessionSnap)> {
+    match target {
+        Target::Session(name) => {
+            let i = snap.sessions.iter().position(|s| &s.name == name)?;
+            Some((ClosedKind::Session, snap.sessions.remove(i)))
+        }
+        Target::Window { session, window_id } => {
+            let s = snap.sessions.iter_mut().find(|s| &s.name == session)?;
+            let i = s.windows.iter().position(|w| &w.id == window_id)?;
+            let mut one = s.clone();
+            one.windows = vec![s.windows.remove(i)];
+            Some((ClosedKind::Window, one))
+        }
+    }
+}
+
+/// `tmux` arguments closing `target`.
+fn kill_args(target: &Target) -> Vec<String> {
+    match target {
+        Target::Session(name) => vec!["kill-session".into(), "-t".into(), format!("={name}")],
+        Target::Window { window_id, .. } => {
+            vec!["kill-window".into(), "-t".into(), window_id.clone()]
+        }
+    }
 }
 
 pub fn load_closed() -> Vec<ClosedEntry> {
@@ -546,6 +579,53 @@ impl Tracker {
         }
         self.prev = Some(cur);
     }
+
+    /// Close `targets`, each archived in the closed history first so it can
+    /// always be reopened. A target missing from the last snapshot (none
+    /// yet, or a restore is running) is left open; one tmux fails to close is
+    /// dropped from the history again. Returns each closed target with its
+    /// history id.
+    pub fn close(
+        &mut self,
+        targets: Vec<Target>,
+        reason: CloseReason,
+        now: u64,
+    ) -> Vec<(Target, u64)> {
+        let Some(prev) = self.prev.as_mut() else {
+            return Vec::new();
+        };
+        // Taken out of `prev`, so the next tick doesn't record them again.
+        let (targets, entries): (Vec<Target>, Vec<_>) = targets
+            .into_iter()
+            .filter_map(|t| take_target(prev, &t).map(|e| (t, e)))
+            .unzip();
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let mut history = load_closed();
+        let ids = record_closed(&mut history, entries, reason, now);
+        if save_closed(&history).is_err() {
+            return Vec::new();
+        }
+        let mut closed = Vec::new();
+        let mut failed = Vec::new();
+        for (target, id) in targets.into_iter().zip(ids) {
+            let ok = Command::new("tmux")
+                .args(kill_args(&target))
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if ok {
+                closed.push((target, id));
+            } else {
+                failed.push(id);
+            }
+        }
+        if !failed.is_empty() {
+            history.retain(|e| !failed.contains(&e.id));
+            let _ = save_closed(&history);
+        }
+        closed
+    }
 }
 
 #[cfg(test)]
@@ -554,7 +634,7 @@ mod tests {
 
     fn pane(session: &str, window: &str, index: u32, pane_index: u32, id: &str) -> Pane {
         let mut p = inventory::parse_panes(&format!(
-            "{id}\t{session}\t{window}\t{index}\tw\t{pane_index}\t1\t1\t1\t1\t0\tzsh\t/src\t1\t\t\twork\tL\t\t"
+            "{id}\t{session}\t{window}\t{index}\tw\t{pane_index}\t1\t1\t1\t1\t0\tzsh\t/src\t1\t\t\twork\tL\t\t\t"
         ))
         .remove(0);
         p.window_active = index == 0;
@@ -706,6 +786,36 @@ mod tests {
         assert_eq!(h.last().unwrap().id, CLOSED_MAX as u64 + 1);
         record_closed(&mut h, Vec::new(), CloseReason::Manual, 20 + CLOSED_MAX_AGE);
         assert!(h.is_empty());
+    }
+
+    #[test]
+    fn take_target_splits_windows_and_sessions() {
+        let panes = [
+            pane("a", "@1", 0, 0, "%1"),
+            pane("a", "@2", 1, 0, "%2"),
+            pane("b", "@3", 0, 0, "%3"),
+        ];
+        let mut s = snap(&panes);
+        let window = Target::Window {
+            session: "a".into(),
+            window_id: "@2".into(),
+        };
+        let (kind, one) = take_target(&mut s, &window).unwrap();
+        assert_eq!(kind, ClosedKind::Window);
+        assert_eq!((one.name.as_str(), one.windows.len()), ("a", 1));
+        assert_eq!(one.windows[0].id, "@2");
+        assert_eq!(s.sessions[0].windows.len(), 1);
+        assert!(take_target(&mut s, &window).is_none());
+        let (kind, b) = take_target(&mut s, &Target::Session("b".into())).unwrap();
+        assert_eq!((kind, b.name.as_str()), (ClosedKind::Session, "b"));
+        assert_eq!(s.sessions.len(), 1);
+        // Nothing was closed manually: the next diff records nothing.
+        assert!(closed_between(&s, &snap(&panes[..1])).is_empty());
+        assert_eq!(kill_args(&window).join(" "), "kill-window -t @2");
+        assert_eq!(
+            kill_args(&Target::Session("b".into())).join(" "),
+            "kill-session -t =b"
+        );
     }
 
     #[test]

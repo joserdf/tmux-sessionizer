@@ -16,6 +16,7 @@ pub mod resources;
 pub mod restore;
 pub mod server;
 pub mod snapshot;
+pub mod suspend;
 pub mod theme;
 pub mod tmux;
 pub mod ui;

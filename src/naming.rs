@@ -254,6 +254,7 @@ mod tests {
             window_active: false,
             pane_active: false,
             pending_restore: String::new(),
+            keep: false,
             title: title.into(),
         }
     }

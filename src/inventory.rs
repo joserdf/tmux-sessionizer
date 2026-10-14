@@ -62,6 +62,10 @@ pub struct Pane {
     /// (`snapshot::Pending` JSON), until something runs in it.
     #[serde(default)]
     pub pending_restore: String,
+    /// `@sessionizer_keep` is set on the pane, its window or its session:
+    /// never auto-close it.
+    #[serde(default)]
+    pub keep: bool,
     /// Title set by the program in the pane (Claude sets `✳ <session name>`).
     pub title: String,
 }
@@ -306,7 +310,8 @@ const FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_index}
 #{window_name}\t#{pane_index}\t#{pane_pid}\t#{pane_active}\t#{window_active}\t\
 #{session_attached}\t#{window_activity}\t#{pane_current_command}\t\
 #{pane_current_path}\t#{automatic-rename}\t#{@sessionizer_autoname}\t\
-#{@sessionizer_lastname}\t#{@category}\t#{window_layout}\t#{@sessionizer_restore}\t#{pane_title}";
+#{@sessionizer_lastname}\t#{@category}\t#{window_layout}\t#{@sessionizer_restore}\t\
+#{@sessionizer_keep}\t#{pane_title}";
 
 /// Parse `list-panes -a -F FORMAT` output. Malformed lines are skipped.
 pub fn parse_panes(stdout: &str) -> Vec<Pane> {
@@ -314,8 +319,8 @@ pub fn parse_panes(stdout: &str) -> Vec<Pane> {
 }
 
 fn parse_pane_line(line: &str) -> Option<Pane> {
-    let f: Vec<&str> = line.splitn(20, '\t').collect();
-    if f.len() != 20 {
+    let f: Vec<&str> = line.splitn(21, '\t').collect();
+    if f.len() != 21 {
         return None;
     }
     Some(Pane {
@@ -339,7 +344,8 @@ fn parse_pane_line(line: &str) -> Option<Pane> {
         category: f[16].to_string(),
         window_layout: f[17].to_string(),
         pending_restore: f[18].to_string(),
-        title: f[19].to_string(),
+        keep: !matches!(f[19], "" | "0" | "off"),
+        title: f[20].to_string(),
     })
 }
 
@@ -478,7 +484,7 @@ mod tests {
 
     fn line(id: &str, session: &str, command: &str, cwd: &str, title: &str) -> String {
         format!(
-            "{id}\t{session}\t@1\t0\twin\t0\t100\t1\t1\t1\t1700000000\t{command}\t{cwd}\t1\t\t\t\tL\t\t{title}"
+            "{id}\t{session}\t@1\t0\twin\t0\t100\t1\t1\t1\t1700000000\t{command}\t{cwd}\t1\t\t\t\tL\t\t\t{title}"
         )
     }
 
@@ -489,7 +495,7 @@ mod tests {
     #[test]
     fn parses_all_fields() {
         let p = parse_pane_line(
-            "%3\tgates\t@2\t1\tclaude\t0\t23685\t1\t0\t2\t1791900000\tclaude\t/home/u/gates\t0\toff\tgates\twork\tab12,80x24,0,0,3\t{}\t✳ gates-presentation",
+            "%3\tgates\t@2\t1\tclaude\t0\t23685\t1\t0\t2\t1791900000\tclaude\t/home/u/gates\t0\toff\tgates\twork\tab12,80x24,0,0,3\t{}\t1\t✳ gates-presentation",
         )
         .unwrap();
         assert_eq!(p.id, "%3");
@@ -510,6 +516,7 @@ mod tests {
         assert_eq!(p.window_layout, "ab12,80x24,0,0,3");
         assert!(p.pane_active && !p.window_active);
         assert_eq!(p.pending_restore, "{}");
+        assert!(p.keep);
         assert_eq!(p.title, "✳ gates-presentation");
     }
 

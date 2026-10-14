@@ -224,10 +224,10 @@ fn layout_size(layout: &str) -> Option<(&str, &str)> {
     layout.split(',').nth(1)?.split_once('x')
 }
 
-struct Paste {
-    pane: String,
-    text: String,
-    submit: bool,
+pub(crate) struct Paste {
+    pub pane: String,
+    pub text: String,
+    pub submit: bool,
 }
 
 /// Panes, layout, names and options of a window whose first pane exists.
@@ -385,7 +385,7 @@ fn prompt_ready(pane: &str) -> bool {
         .is_ok_and(|x| x.parse::<u32>().is_ok_and(|x| x > 0))
 }
 
-fn paste_when_ready(mut pending: Vec<Paste>) {
+pub(crate) fn paste_when_ready(mut pending: Vec<Paste>) {
     let start = Instant::now();
     while !pending.is_empty() {
         let timed_out = start.elapsed() >= PROMPT_WAIT;

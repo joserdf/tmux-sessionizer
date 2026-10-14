@@ -77,18 +77,21 @@ pub struct SessionCloseState {
     pub idle: bool,
     /// The worktree has uncommitted changes.
     pub has_uncommitted_changes: bool,
+    /// An agent is waiting on a question or a permission prompt.
+    pub blocked: bool,
 }
 
 /// Decide what to do with a session under the given policy.
 ///
 /// Rules, in priority order:
 /// 1. Disabled policy never closes.
-/// 2. A dirty session with `respect_dirty` set always needs confirmation.
-/// 3. A finished session closes when `close_on_finish` is set.
-/// 4. An idle session closes when an idle timeout is configured.
-/// 5. Otherwise, nothing happens.
+/// 2. A blocked session never closes.
+/// 3. A dirty session with `respect_dirty` set always needs confirmation.
+/// 4. A finished session closes when `close_on_finish` is set.
+/// 5. An idle session closes when an idle timeout is configured.
+/// 6. Otherwise, nothing happens.
 pub fn evaluate(cfg: &AutoCloseConfig, st: &SessionCloseState) -> CloseAction {
-    if !cfg.enabled {
+    if !cfg.enabled || st.blocked {
         return CloseAction::None;
     }
     if st.has_uncommitted_changes && cfg.respect_dirty {
@@ -101,6 +104,14 @@ pub fn evaluate(cfg: &AutoCloseConfig, st: &SessionCloseState) -> CloseAction {
         return CloseAction::Close;
     }
     CloseAction::None
+}
+
+/// A window or a whole session to close, archived first (see
+/// `snapshot::Tracker::close`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Session(String),
+    Window { session: String, window_id: String },
 }
 
 #[cfg(test)]
@@ -126,7 +137,18 @@ mod tests {
             finished,
             idle,
             has_uncommitted_changes: dirty,
+            blocked: false,
         }
+    }
+
+    #[test]
+    fn blocked_never_closes() {
+        let cfg = config(true, Some(900), true, false);
+        let st = SessionCloseState {
+            blocked: true,
+            ..state(true, true, false)
+        };
+        assert_eq!(evaluate(&cfg, &st), CloseAction::None);
     }
 
     #[test]

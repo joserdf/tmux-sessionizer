@@ -541,6 +541,9 @@ pub struct Config {
     /// Snapshot restore (after a reboot, `showrunner restore`, reopen). A table.
     #[serde(default)]
     pub restore: crate::restore::RestoreConfig,
+    /// Stop idle agents and paste their resume command. A table.
+    #[serde(default)]
+    pub auto_suspend: crate::suspend::SuspendConfig,
 }
 
 /// Root directory for all showrunner data: ~/.showrunner

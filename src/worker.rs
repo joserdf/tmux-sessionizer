@@ -8,6 +8,7 @@ use crate::autoclose::{self, AutoCloseConfig, CloseAction};
 use crate::hooks::HookDelivery;
 use crate::inventory::{self, AgentStatus, Pane, PaneState};
 use crate::resources::SessionResources;
+use crate::snapshot::CloseReason;
 use crate::tmux::{self, DiffStats, SessionStatus, TmuxSession};
 
 /// Task info for computing branch diffs.
@@ -365,15 +366,17 @@ fn worker_loop(
     let mut generation: u64 = 0;
     // Auto-close policy (opt-in; disabled by default) and window naming. Read
     // once at start.
-    let (auto_close, naming, restore) = match crate::config::Config::load() {
-        Ok(c) => (c.auto_close, c.naming, c.restore),
+    let (auto_close, naming, restore, auto_suspend) = match crate::config::Config::load() {
+        Ok(c) => (c.auto_close, c.naming, c.restore, c.auto_suspend),
         Err(_) => (
             AutoCloseConfig::default(),
+            Default::default(),
             Default::default(),
             Default::default(),
         ),
     };
     let mut snapshots = crate::snapshot::Tracker::new();
+    let mut suspender = crate::suspend::Suspender::default();
     // tmux's default pane title, never used as a window name.
     let hostname = crate::app::detect_hostname();
     let mut idle_since: HashMap<String, Instant> = HashMap::new();
@@ -652,9 +655,22 @@ fn worker_loop(
                 &auto_close,
                 &statuses,
                 &session_agents,
+                &panes,
+                &pane_states,
+                &mut snapshots,
                 &mut idle_since,
                 &mut ac_acted,
                 &mut dirty_cache,
+            );
+        }
+        // Idle agents are suspended after days, so once a minute is plenty.
+        if !fallback && tick.is_multiple_of(120) {
+            suspender.step(
+                &auto_suspend,
+                &panes,
+                &pane_states,
+                &restore.redact,
+                unix_now(),
             );
         }
 
@@ -727,12 +743,17 @@ fn finished_status(
 
 /// Apply the auto-close policy to agent sessions (never plain terminals or run
 /// sessions). A clean finished/idle session is closed; a dirty one is left
-/// alone but surfaced once via a notification. Uses `kill_session_only` so the
-/// worktree/branch/records are preserved.
+/// alone but surfaced once via a notification. Only the tmux session is killed
+/// (archived in the closed history first), so the worktree/branch/records are
+/// preserved.
+#[allow(clippy::too_many_arguments)]
 fn auto_close_step(
     cfg: &AutoCloseConfig,
     statuses: &HashMap<String, SessionStatus>,
     session_agents: &HashMap<String, String>,
+    panes: &[Pane],
+    pane_states: &HashMap<String, PaneState>,
+    snapshots: &mut crate::snapshot::Tracker,
     idle_since: &mut HashMap<String, Instant>,
     acted: &mut HashMap<String, CloseAction>,
     dirty_cache: &mut HashMap<String, (Instant, bool)>,
@@ -777,6 +798,18 @@ fn auto_close_step(
         let Some(record) = records.get(name) else {
             continue;
         };
+        let session_panes = || panes.iter().filter(|p| &p.session == name);
+        if session_panes().any(|p| p.keep) {
+            continue;
+        }
+        let blocked = session_panes().any(|p| {
+            pane_states.get(&p.id).is_some_and(|st| {
+                matches!(
+                    st.status,
+                    Some(AgentStatus::Question | AgentStatus::Permission)
+                )
+            })
+        });
 
         // Fail-safe dirty check on the authoritative work dir (worktree or
         // project path), not the user-mutable pane cwd. Any read error is
@@ -804,12 +837,17 @@ fn auto_close_step(
                 finished,
                 idle,
                 has_uncommitted_changes: dirty,
+                blocked,
             },
         );
 
         match action {
             CloseAction::Close => {
-                let _ = tmux::kill_session_only(name);
+                let target = autoclose::Target::Session(name.clone());
+                let closed = snapshots.close(vec![target], CloseReason::AutoClose, unix_now());
+                let Some((_, id)) = closed.first() else {
+                    continue;
+                };
                 // Mark the record so the TUI's startup restore doesn't bring an
                 // auto-closed session back (restart / unarchive clears it).
                 crate::config::set_session_auto_closed(name, true);
@@ -818,7 +856,10 @@ fn auto_close_step(
                 dirty_cache.remove(name);
                 crate::notify::send(&crate::notify::Notification {
                     title: "showrunner: auto-closed".to_string(),
-                    body: format!("Session '{name}' was auto-closed ({reason}, clean)."),
+                    body: format!(
+                        "Session '{name}' was auto-closed ({reason}, clean). \
+                         Reopen: showrunner reopen {id}"
+                    ),
                     urgent: false,
                 });
             }

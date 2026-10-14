@@ -198,7 +198,7 @@ args and grouping keys). Sessions are addressed as `=name:` so `gate` never matc
 - `reopen` adds a window at the next free index when its old index is taken.
 - `restore --file <path>` restores a rotation (`~/.showrunner/snapshot.N.json`).
 
-### Phase 5 — Inactivity and auto-close for windows and any session (depends on 1, 4)
+### Phase 5 — Inactivity: suspend idle agents (depends on 1, 4)
 
 1. Idle time per window: agent panes `now - status_since` when `Idle`/`Done`; shell panes
    `now - activity_ts`. Exposed in the inventory and in `@agent_idle`.
@@ -208,6 +208,25 @@ args and grouping keys). Sessions are addressed as `=name:` so `gate` never matc
    per-session `@sessionizer_keep 1` opt-out. Still `enabled = false` by default.
 4. Every auto-close first writes a closed-history entry with `reason = auto_close`, so it's always
    reopenable.
+
+**As built (redesigned with the user: windows are never closed, idle agents are suspended):**
+- `src/suspend.rs`, `[auto_suspend]`: `enabled` (off by default), `idle_secs = 604800` (7 days),
+  `exclude_categories = ["pinned"]`, `respect_dirty = true`. Once a minute the worker picks agent
+  panes that are `Idle` (a `Done` result not yet read waits), quiet for `idle_secs` (window
+  activity), with a known agent session id (not Pi), not on screen, not kept
+  (`@sessionizer_keep` on the pane, window or session, read as inventory field 20), not in an
+  excluded category, not holding an unrun restored command, and whose cwd has no uncommitted git
+  changes (outside a repo counts as clean).
+- Suspend = stop only the agent, then paste the resume command (`restore::pane_command`, never
+  run) and set `@sessionizer_restore`, so snapshots keep it and it isn't suspended twice. An
+  agent under the pane's shell gets SIGTERM on its process group (other jobs keep running); an
+  agent that is the pane's own process is replaced with `respawn-pane -k <default-shell>`
+  (without a command, tmux reruns the agent). An agent that doesn't stop within 10 s, or sits in
+  a dirty tree, isn't retried until it leaves the idle state.
+- No window-level auto-close. The existing `cm__` session auto-close (`[auto_close]`, still off)
+  gained the `blocked` guard and `@sessionizer_keep`, and archives the session in the closed
+  history (`reason = auto_close`, shown as `(auto-closed)` in `closed list`) before killing it,
+  via `snapshot::Tracker::close`, which also keeps the next tick from recording it as manual.
 
 ### Phase 6 — MCP server (depends on 0, 1, 3, 4)
 

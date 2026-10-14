@@ -217,7 +217,11 @@ fn cmd_closed(args: &[String]) -> Result<()> {
         } else {
             ago
         };
-        println!("{:>4}  {ago:>4} ago  {what}", e.id);
+        let auto = match e.reason {
+            crate::snapshot::CloseReason::AutoClose => "  (auto-closed)",
+            crate::snapshot::CloseReason::Manual => "",
+        };
+        println!("{:>4}  {ago:>4} ago  {what}{auto}", e.id);
     }
     Ok(())
 }
