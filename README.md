@@ -178,11 +178,15 @@ A window resolves to its agent pane.
   - `search_sessions(query)`: ranks windows by the query's words in their names,
     agent title, category, branch, cwd, recent output and the agent's transcript
     (Claude, Codex).
+  - `list_cards(board?, column?)`: kanban cards across all boards (or one board /
+    column) with id, key, title, priority, labels and url.
 - **Act:**
   - `send_message`, `send_keys`, `approve(yes|always|no)`, `answer(choice)`
   - `create_session`, `create_window`, `rename`, `set_category`
   - `close` (archived first, so it's reopenable), `reopen(id)`
   - `suspend` (stop the agent, paste its resume command), `resume`
+  - `move_card(board, id, column)`: move a card between kanban columns.
+  - `dispatch(card?, dry_run?)`: run a dispatch pass, or dispatch one Ready card.
 
 Agent statuses come from the daemon. Without the daemon, only which agent runs
 where is known.

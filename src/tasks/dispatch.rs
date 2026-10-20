@@ -662,6 +662,82 @@ pub fn dispatch_once(dry_run: bool) -> Result<DispatchSummary> {
     dispatch_cfg(&mut cfg, &sessions, dry_run)
 }
 
+/// Dispatch a single card by id or key. The card must be Ready and not already
+/// dispatched, and the board's (and global) running cap must not be reached.
+/// `dry_run` only reports what *would* be dispatched.
+pub fn dispatch_card_once(card_ref: &str, dry_run: bool) -> Result<DispatchSummary> {
+    if is_paused() {
+        anyhow::bail!("dispatch is paused");
+    }
+    let mut cfg = Config::load()?;
+    let sessions = config::load_sessions();
+
+    let mut summary = DispatchSummary::default();
+    let boards = cfg.boards.clone();
+    // List each board once; an unreachable board is skipped, not fatal.
+    let mut listed = Vec::new();
+    for board in &boards {
+        match provider_for(&mut cfg, board).and_then(|p| p.list()) {
+            Ok(cards) => {
+                let statuses = running_statuses(&cards, &sessions, &board.project);
+                let running = assess_running(&cards, &statuses);
+                listed.push((board, cards, running));
+            }
+            Err(e) => eprintln!("dispatcher: board {}: {e:#}", board.name),
+        }
+    }
+    let global_running: usize = listed.iter().map(|(_, _, r)| r).sum();
+
+    for (board, cards, running) in &listed {
+        let (board, running) = (*board, *running);
+        let Some(card) = cards.iter().find(|c| {
+            (c.id.0 == card_ref || c.key == card_ref)
+                && c.column == Column::Ready
+                && !card_already_dispatched(&sessions, &board.project, &c.id.0)
+        }) else {
+            continue;
+        };
+        if running >= board.max_running || global_running >= cfg.dispatch.max_running {
+            anyhow::bail!(
+                "card '{card_ref}' is Ready but the running cap is reached \
+                 (board {}/{}, global {}/{})",
+                running,
+                board.max_running,
+                global_running,
+                cfg.dispatch.max_running
+            );
+        }
+        if dry_run {
+            summary.dispatched = 1;
+            summary.boards.push(BoardSummary {
+                name: board.name.clone(),
+                dispatched: vec![card.key.clone()],
+                running,
+                ready: cards
+                    .iter()
+                    .filter(|c| c.column == Column::Ready)
+                    .count(),
+                planned: vec![],
+            });
+            return Ok(summary);
+        }
+        dispatch_card(&mut cfg, board, card)?;
+        cfg.save()?;
+        summary.dispatched = 1;
+        summary.boards.push(BoardSummary {
+            name: board.name.clone(),
+            dispatched: vec![card.key.clone()],
+            running,
+            ready: 0,
+            planned: vec![],
+        });
+        return Ok(summary);
+    }
+    anyhow::bail!(
+        "no Ready card '{card_ref}' found (not on any board, already dispatched, or not in Ready)"
+    )
+}
+
 /// Whether the dispatcher is paused (a `dispatch.paused` marker in the data
 /// dir). A no-op pass while paused.
 pub fn is_paused() -> bool {

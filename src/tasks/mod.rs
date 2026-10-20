@@ -31,6 +31,13 @@ pub enum Column {
     Done,
 }
 
+/// Parse a column name (snake_case, e.g. `needs_you`) into a [`Column`].
+/// Shared by the web API and MCP tools so the accepted names stay in sync.
+pub fn parse_column(s: &str) -> Result<Column> {
+    serde_json::from_value(serde_json::Value::String(s.to_string()))
+        .map_err(|_| anyhow!("unknown column '{s}'"))
+}
+
 /// Uniquely identifies a card within its provider.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CardId(pub String);
@@ -283,6 +290,15 @@ pub fn provider_for<'a>(
 mod tests {
     use super::*;
     use crate::config::{Project, Task};
+
+    #[test]
+    fn parses_column_names() {
+        assert_eq!(parse_column("backlog").unwrap(), Column::Backlog);
+        assert_eq!(parse_column("needs_you").unwrap(), Column::NeedsYou);
+        assert_eq!(parse_column("done").unwrap(), Column::Done);
+        assert!(parse_column("in-progress").is_err());
+        assert!(parse_column("").is_err());
+    }
 
     fn task(name: &str, branch: &str) -> Task {
         Task {

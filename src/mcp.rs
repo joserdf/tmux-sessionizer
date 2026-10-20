@@ -16,7 +16,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::control::{self, Inventory};
@@ -194,6 +194,39 @@ struct Suspend {
     force: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListCards {
+    #[schemars(description = "Only this board's cards (default: all boards)")]
+    board: Option<String>,
+    #[schemars(
+        description = "Only cards in this column: backlog, ready, running, needs_you, review or done (default: all)"
+    )]
+    column: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MoveCard {
+    #[schemars(description = "Board name")]
+    board: String,
+    #[schemars(description = "Card id")]
+    id: String,
+    #[schemars(
+        description = "Column to move to: backlog, ready, running, needs_you, review or done"
+    )]
+    column: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DispatchCards {
+    #[schemars(
+        description = "Card id or key; when given, dispatch only that Ready card (default: one full pass)"
+    )]
+    card: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Report what would be dispatched without doing it (default false)")]
+    dry_run: bool,
+}
+
 #[derive(Clone)]
 pub struct Server {
     read_only: bool,
@@ -249,6 +282,58 @@ where
         Ok(r) => render(r),
         Err(e) => Err(format!("internal error: {e}")),
     }
+}
+
+/// Run `f` on a blocking thread with a fresh config (board tools; no
+/// inventory needed). Provider HTTP calls and config I/O run off the async
+/// runtime, like the other tools.
+async fn with_config<F>(f: F) -> Out
+where
+    F: FnOnce(&mut Config) -> Result<Value> + Send + 'static,
+{
+    let joined = tokio::task::spawn_blocking(move || {
+        let mut cfg = Config::load()?;
+        f(&mut cfg)
+    })
+    .await;
+    match joined {
+        Ok(r) => render(r),
+        Err(e) => Err(format!("internal error: {e}")),
+    }
+}
+
+/// Shape boards' cards for `list_cards`, honoring optional board/column
+/// filters. Pure, so it is unit-tested in isolation.
+fn cards_json(
+    boards: Vec<crate::tasks::dispatch::BoardCards>,
+    board: Option<&str>,
+    column: Option<&str>,
+) -> Result<Value> {
+    let wanted = column.map(crate::tasks::parse_column).transpose()?;
+    let mut out = Vec::new();
+    for b in boards {
+        if board.is_some_and(|name| b.name != name) {
+            continue;
+        }
+        let cards: Vec<Value> = b
+            .cards
+            .iter()
+            .filter(|c| wanted.is_none_or(|w| c.column == w))
+            .map(|c| {
+                json!({
+                    "id": c.id.0,
+                    "key": c.key,
+                    "title": c.title,
+                    "column": c.column,
+                    "priority": c.priority,
+                    "labels": c.labels,
+                    "url": c.url,
+                })
+            })
+            .collect();
+        out.push(json!({ "board": b.name, "cards": cards }));
+    }
+    Ok(Value::Array(out))
 }
 
 impl Server {
@@ -496,6 +581,77 @@ impl Server {
     async fn resume(&self, Parameters(p): Parameters<TargetArg>) -> Out {
         self.act(move |inv, _| inv.resume(&p.target)).await
     }
+
+    #[tool(
+        description = "Kanban cards across all boards (or one board / column): id, key, title, column, priority, labels and url",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_cards(&self, Parameters(p): Parameters<ListCards>) -> Out {
+        with_config(move |cfg| {
+            let boards = crate::tasks::dispatch::board_cards(cfg)?;
+            cards_json(boards, p.board.as_deref(), p.column.as_deref())
+        })
+        .await
+    }
+
+    #[tool(description = "Move a card to another column on a board (backlog, ready, running, needs_you, review or done)")]
+    async fn move_card(&self, Parameters(p): Parameters<MoveCard>) -> Out {
+        if self.read_only {
+            return Err("showrunner MCP is read-only ([mcp] read_only = true)".into());
+        }
+        let column = match crate::tasks::parse_column(&p.column) {
+            Ok(c) => c,
+            Err(e) => return Err(format!("{e:#}")),
+        };
+        let board_name = p.board;
+        let card_id = crate::tasks::CardId(p.id);
+        let joined = tokio::task::spawn_blocking(move || -> Result<()> {
+            // Load, apply and save under the config lock so a concurrent
+            // dispatcher write isn't clobbered.
+            let mut result = Ok(());
+            Config::modify(|cfg| {
+                let Some(board) = cfg.boards.iter().find(|b| b.name == board_name).cloned()
+                else {
+                    result = Err(anyhow::anyhow!("board '{board_name}' not found"));
+                    return;
+                };
+                result = crate::tasks::provider_for(cfg, &board)
+                    .map_err(|e| anyhow::anyhow!("{e:#}"))
+                    .and_then(|mut p| {
+                        p.move_to(&card_id, column)
+                            .map_err(|_| anyhow::anyhow!("card '{}' not found", card_id.0))
+                    });
+            })
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+            result
+        })
+        .await;
+        match joined {
+            Ok(r) => render(r.map(|_| json!({ "ok": true }))),
+            Err(e) => Err(format!("internal error: {e}")),
+        }
+    }
+
+    #[tool(description = "Run one dispatch pass, or dispatch a single Ready card (by id or key). Returns a summary of what was / would be dispatched")]
+    async fn dispatch(&self, Parameters(p): Parameters<DispatchCards>) -> Out {
+        if self.read_only {
+            return Err("showrunner MCP is read-only ([mcp] read_only = true)".into());
+        }
+        let card = p.card;
+        let dry_run = p.dry_run;
+        let joined = tokio::task::spawn_blocking(move || -> Result<Value> {
+            let summary = match card {
+                Some(c) => crate::tasks::dispatch::dispatch_card_once(&c, dry_run)?,
+                None => crate::tasks::dispatch::dispatch_once(dry_run)?,
+            };
+            Ok(crate::tasks::web::dispatch_summary_json(&summary))
+        })
+        .await;
+        match joined {
+            Ok(r) => render(r),
+            Err(e) => Err(format!("internal error: {e}")),
+        }
+    }
 }
 
 #[tool_handler]
@@ -520,4 +676,58 @@ pub fn run() -> Result<()> {
                 .await?;
             Ok(())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::{Card, CardId, Column};
+
+    fn card(id: &str, col: Column, priority: Option<u8>) -> Card {
+        Card {
+            id: CardId(id.to_string()),
+            key: id.to_string(),
+            title: id.to_string(),
+            body: String::new(),
+            column: col,
+            labels: vec!["urgent".into()],
+            priority,
+            url: Some(format!("https://x/{id}")),
+        }
+    }
+
+    fn boards() -> Vec<crate::tasks::dispatch::BoardCards> {
+        vec![
+            crate::tasks::dispatch::BoardCards {
+                name: "alpha".into(),
+                cards: vec![card("a1", Column::Ready, Some(3)), card("a2", Column::Done, None)],
+            },
+            crate::tasks::dispatch::BoardCards {
+                name: "beta".into(),
+                cards: vec![card("b1", Column::Ready, None)],
+            },
+        ]
+    }
+
+    #[test]
+    fn cards_json_filters_by_board_and_column() {
+        let all = cards_json(boards(), None, None).unwrap();
+        assert_eq!(all.as_array().unwrap().len(), 2);
+        assert_eq!(all[0]["board"], "alpha");
+        assert_eq!(all[0]["cards"][0]["column"], "ready");
+        assert_eq!(all[0]["cards"][1]["column"], "done");
+
+        let ready = cards_json(boards(), None, Some("ready")).unwrap();
+        assert_eq!(ready[0]["cards"].as_array().unwrap().len(), 1);
+        assert_eq!(ready[0]["cards"][0]["id"], "a1");
+
+        let beta = cards_json(boards(), Some("beta"), None).unwrap();
+        assert_eq!(beta.as_array().unwrap().len(), 1);
+        assert_eq!(beta[0]["board"], "beta");
+
+        let none = cards_json(boards(), Some("nope"), None).unwrap();
+        assert_eq!(none.as_array().unwrap().len(), 0);
+
+        assert!(cards_json(boards(), None, Some("bogus")).is_err());
+    }
 }

@@ -697,7 +697,7 @@ async fn api_board_move(
             "board moves are local-only".to_string(),
         ));
     }
-    let column = serde_json::from_value::<crate::tasks::Column>(json!(body.column))
+    let column = crate::tasks::parse_column(&body.column)
         .map_err(|_| bad_request(format!("unknown column '{}'", body.column)))?;
 
     let result = tokio::task::spawn_blocking(move || -> Result<(), (StatusCode, String)> {
