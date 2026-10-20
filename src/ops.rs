@@ -350,10 +350,104 @@ pub fn fork_session(source_tmux_name: &str) -> Result<String> {
     Ok(tmux_name)
 }
 
+/// Spawn a worker under `parent` (a task session): a new session of the same
+/// task, in its own worktree on a branch off the task branch, started with
+/// `prompt`. Its record links back to `parent`. `agent` defaults to the
+/// parent's agent.
+pub fn spawn_worker(cfg: &Config, parent: &str, prompt: &str, agent: Option<&str>) -> Result<String> {
+    let record = config::load_sessions()
+        .get(parent)
+        .cloned()
+        .with_context(|| format!("'{parent}' is not a showrunner task session"))?;
+    let project = find_project(cfg, &record.project_name)?;
+    let agent = match agent {
+        Some(_) => resolve_agent(cfg, agent)?,
+        None => record.agent_kind(),
+    };
+    let sessions = tmux::list_sessions().unwrap_or_default();
+    let session_name =
+        tmux::next_session_number(&record.project_name, &record.task_name, &sessions).to_string();
+    let tmux_name = create_task_session(
+        cfg,
+        project,
+        &record.task_name,
+        &record.task_branch,
+        session_name,
+        record.use_worktree,
+        Some(prompt),
+        agent,
+    )?;
+    config::set_session_record_parent(&tmux_name, parent.to_string());
+    Ok(tmux_name)
+}
+
+/// The live (unarchived) records whose `parent` is `parent`, sorted by name.
+pub fn children_of(
+    sessions: &std::collections::HashMap<String, config::SessionRecord>,
+    parent: &str,
+) -> Vec<(String, config::SessionRecord)> {
+    let mut out: Vec<_> = sessions
+        .iter()
+        .filter(|(_, r)| !r.archived && r.parent.as_deref() == Some(parent))
+        .map(|(n, r)| (n.clone(), r.clone()))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// One-line summaries of the commits in `dir`'s HEAD that `base` lacks.
+pub fn commits_since(dir: &str, base: &str) -> Result<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .args(["-C", dir, "log", "--oneline", &format!("{base}..HEAD")])
+        .output()?;
+    if !out.status.success() {
+        bail!("git log failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect())
+}
+
 /// Look up a project by name in the loaded config.
 pub fn find_project<'a>(cfg: &'a Config, name: &str) -> Result<&'a Project> {
     cfg.projects
         .iter()
         .find(|p| p.name == name)
         .ok_or_else(|| anyhow::anyhow!("project '{name}' not found"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn record(parent: Option<&str>, archived: bool) -> config::SessionRecord {
+        config::SessionRecord {
+            project_name: "p".to_string(),
+            project_path: "/tmp/p".to_string(),
+            task_name: "t".to_string(),
+            task_branch: "sr/t".to_string(),
+            session_name: "2".to_string(),
+            use_worktree: true,
+            archived,
+            auto_closed: false,
+            agent: "claude".to_string(),
+            board_card: None,
+            parent: parent.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn children_are_live_records_of_the_parent_sorted() {
+        let sessions: HashMap<String, config::SessionRecord> = [
+            ("w3", record(Some("boss"), false)),
+            ("w1", record(Some("boss"), false)),
+            ("old", record(Some("boss"), true)),
+            ("other", record(Some("x"), false)),
+            ("boss", record(None, false)),
+        ]
+        .into_iter()
+        .map(|(n, r)| (n.to_string(), r))
+        .collect();
+        let names: Vec<String> = children_of(&sessions, "boss").into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["w1", "w3"]);
+    }
 }

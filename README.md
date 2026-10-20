@@ -180,6 +180,9 @@ A window resolves to its agent pane.
     (Claude, Codex).
   - `list_cards(board?, column?)`: kanban cards across all boards (or one board /
     column) with id, key, title, priority, labels and url.
+  - `children(session)`: the live sessions forked or spawned from a session.
+  - `collect(session, lines?)`: a worker's status, last output and the commits
+    its worktree has beyond the task branch.
 - **Act:**
   - `send_message`, `send_keys`, `approve(yes|always|no)`, `answer(choice)`
   - `create_session`, `create_window`, `rename`, `set_category`
@@ -187,6 +190,10 @@ A window resolves to its agent pane.
   - `suspend` (stop the agent, paste its resume command), `resume`
   - `move_card(board, id, column)`: move a card between kanban columns.
   - `dispatch(card?, dry_run?)`: run a dispatch pass, or dispatch one Ready card.
+  - `fork(session)`: fork the session's agent conversation into a new session in
+    the same worktree (Claude, Codex, OpenCode).
+  - `spawn_worker(parent, prompt, agent?)`: start a worker session of the
+    parent's task in its own worktree; `children` and `collect` follow it.
 
 Agent statuses come from the daemon. Without the daemon, only which agent runs
 where is known.

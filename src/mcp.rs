@@ -201,6 +201,30 @@ struct Fork {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct SpawnWorker {
+    #[schemars(description = "The parent task session (tmux name, e.g. from whoami)")]
+    parent: String,
+    #[schemars(description = "First prompt for the worker's agent")]
+    prompt: String,
+    #[schemars(description = "claude, codex, pi or opencode (default: the parent's agent)")]
+    agent: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SessionArg {
+    #[schemars(description = "tmux session name")]
+    session: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct Collect {
+    #[schemars(description = "The worker's tmux session name")]
+    session: String,
+    #[schemars(description = "Output lines from the bottom, up to 500 (default 40)")]
+    lines: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ListCards {
     #[schemars(description = "Only this board's cards (default: all boards)")]
     board: Option<String>,
@@ -589,6 +613,60 @@ impl Server {
     async fn fork(&self, Parameters(p): Parameters<Fork>) -> Out {
         self.act(move |_, _| {
             crate::ops::fork_session(&p.session).map(|n| json!({ "forked": n, "parent": p.session }))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Spawn a worker under a task session: a new session of the same task in its own worktree (branch off the task branch), started with a prompt. Track it with children and collect"
+    )]
+    async fn spawn_worker(&self, Parameters(p): Parameters<SpawnWorker>) -> Out {
+        self.act(move |_, cfg| {
+            let worker = crate::ops::spawn_worker(cfg, &p.parent, &p.prompt, p.agent.as_deref())?;
+            Ok(json!({ "worker": worker, "parent": p.parent }))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "The live sessions forked or spawned from a session, with agent, branch and status",
+        annotations(read_only_hint = true)
+    )]
+    async fn children(&self, Parameters(p): Parameters<SessionArg>) -> Out {
+        with_config(move |_| {
+            let sessions = crate::config::load_sessions();
+            let rows: Vec<Value> = crate::ops::children_of(&sessions, &p.session)
+                .into_iter()
+                .map(|(name, r)| {
+                    let status = crate::tmux::session_agent_status(&name).map(|s| s.code());
+                    json!({
+                        "session": name,
+                        "agent": r.agent,
+                        "task": r.task_name,
+                        "branch": r.task_branch,
+                        "status": status,
+                    })
+                })
+                .collect();
+            Ok(json!(rows))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "A worker's result: its status, last output lines, and the commits its worktree has beyond the task branch",
+        annotations(read_only_hint = true)
+    )]
+    async fn collect(&self, Parameters(p): Parameters<Collect>) -> Out {
+        with_inventory(move |inv, _| {
+            let record = crate::config::load_sessions()
+                .remove(&p.session)
+                .ok_or_else(|| anyhow::anyhow!("'{}' is not a showrunner task session", p.session))?;
+            let mut v = inv.read_output(&p.session, p.lines.unwrap_or(40))?;
+            let cwd = inv.resolve(&p.session)?.pane.cwd.clone();
+            v["session"] = json!(p.session);
+            v["commits"] = json!(crate::ops::commits_since(&cwd, &record.task_branch)?);
+            Ok(v)
         })
         .await
     }
