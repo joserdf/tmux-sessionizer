@@ -741,6 +741,9 @@ pub struct SessionRecord {
     /// twice, including after a daemon restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board_card: Option<String>,
+    /// The tmux session this one was forked from, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 impl SessionRecord {
@@ -818,6 +821,17 @@ pub fn set_session_record_board_card(tmux_name: &str, board_card: String) {
     let mut sessions = load_sessions();
     if let Some(rec) = sessions.get_mut(tmux_name) {
         rec.board_card = Some(board_card);
+        let _ = save_sessions(&sessions);
+    }
+}
+
+/// Set the `parent` (the tmux session a fork came from) on a session record
+/// and persist. No-op if the record doesn't exist.
+pub fn set_session_record_parent(tmux_name: &str, parent: String) {
+    let _g = IO_LOCK.lock().unwrap();
+    let mut sessions = load_sessions();
+    if let Some(rec) = sessions.get_mut(tmux_name) {
+        rec.parent = Some(parent);
         let _ = save_sessions(&sessions);
     }
 }
@@ -1459,6 +1473,7 @@ mod migration_tests {
             auto_closed: false,
             agent: default_agent_id(),
             board_card: None,
+            parent: None,
         };
         assert!(record.belongs_to("My Project", "Fix Bug"));
         // Sanitized forms must not match: records persist raw names.

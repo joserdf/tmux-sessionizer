@@ -4,7 +4,7 @@
 //! agent states are re-read once a second on a background thread, so the
 //! first frame never waits on tmux or the daemon.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -17,7 +17,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::agent::AgentKind;
 use crate::config::{Config, Pricing};
@@ -108,6 +108,8 @@ enum Row {
         category: String,
         attached: bool,
         active_index: u32,
+        /// Nesting depth in the session tree (0 = top level).
+        depth: usize,
     },
     Window(WinRow),
 }
@@ -135,6 +137,45 @@ fn needs_attention(status: Option<AgentStatus>) -> bool {
     )
 }
 
+/// Nest session names under their parents (from session records): each child
+/// appears directly after its parent, indented one level; a child whose parent
+/// isn't among `sessions` is shown at top level. Preserves input order at each
+/// level. Returns `(name, depth)` pairs. Pure, so it is unit-tested in
+/// isolation.
+fn nest_sessions<'a>(
+    sessions: &'a [&'a str],
+    parent_of: &HashMap<String, String>,
+) -> Vec<(&'a str, usize)> {
+    let present: HashSet<&str> = sessions.iter().copied().collect();
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for &s in sessions {
+        if let Some(p) = parent_of.get(s)
+            && present.contains(p.as_str())
+        {
+            children.entry(p.as_str()).or_default().push(s);
+        }
+    }
+    let roots: Vec<&str> = sessions
+        .iter()
+        .copied()
+        .filter(|&s| parent_of.get(s).is_none_or(|p| !present.contains(p.as_str())))
+        .collect();
+    let mut out = Vec::new();
+    let mut visited: HashSet<&str> = HashSet::new();
+    // DFS via a stack so children keep input order under their parent.
+    let mut stack: Vec<(&str, usize)> = roots.iter().rev().map(|&s| (s, 0)).collect();
+    while let Some((s, depth)) = stack.pop() {
+        if !visited.insert(s) {
+            continue;
+        }
+        out.push((s, depth));
+        for &child in children.get(s).into_iter().flatten().rev() {
+            stack.push((child, depth + 1));
+        }
+    }
+    out
+}
+
 /// Category ▸ session ▸ window rows: named categories alphabetically, then
 /// uncategorized sessions; sessions and windows in tmux order. `filter`
 /// keeps windows whose session, name, category, agent or cwd contains it;
@@ -145,6 +186,7 @@ fn build_rows(
     filter: &str,
     attention: bool,
     pricing: &HashMap<String, Pricing>,
+    parents: &HashMap<String, String>,
 ) -> Vec<Row> {
     let needle = filter.trim().to_lowercase();
     let windows = inv.windows();
@@ -167,7 +209,12 @@ fn build_rows(
     let mut rows = Vec::new();
     for category in categories {
         let mut group = Vec::new();
-        for &session in sessions.iter().filter(|s| category_of(s) == category) {
+        let cat_sessions: Vec<&str> = sessions
+            .iter()
+            .filter(|s| category_of(s) == category)
+            .copied()
+            .collect();
+        for (session, depth) in nest_sessions(&cat_sessions, parents) {
             let kept: Vec<WinRow> = windows
                 .iter()
                 .filter(|p| p.session == session)
@@ -216,6 +263,7 @@ fn build_rows(
                 category: category.to_string(),
                 attached: first.attached,
                 active_index,
+                depth,
             });
             group.extend(kept.into_iter().map(Row::Window));
         }
@@ -417,12 +465,17 @@ impl View {
     fn rebuild(&mut self) {
         let Some(inv) = &self.inv else { return };
         let key = self.rows.get(self.sel).and_then(Row::key);
+        let parents: HashMap<String, String> = crate::config::load_sessions()
+            .into_iter()
+            .filter_map(|(name, r)| r.parent.map(|p| (name, p)))
+            .collect();
         self.rows = build_rows(
             inv,
             control::now(),
             &self.filter,
             self.attention,
             &self.pricing,
+            &parents,
         );
         self.sel = key
             .and_then(|k| self.rows.iter().position(|r| r.key().as_ref() == Some(&k)))
@@ -646,7 +699,24 @@ impl View {
                     self.mode = Mode::Confirm(t);
                 }
             }
+            KeyCode::Char('F') => {
+                if let Some(name) = self.selected_session_name() {
+                    let name = name.to_string();
+                    self.act(&format!("fork {name}"), move |_, _| {
+                        crate::ops::fork_session(&name).map(|n| json!({ "forked": n }))
+                    });
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// The tmux session name the selection belongs to.
+    fn selected_session_name(&self) -> Option<&str> {
+        match self.selected()? {
+            Row::Session { name, .. } => Some(name),
+            Row::Window(w) => Some(w.session.as_str()),
+            Row::Category(_) => None,
         }
     }
 
@@ -764,7 +834,7 @@ impl View {
                 Line::from(Span::raw(self.status.clone()))
             }
             Mode::Normal => Line::from(Span::styled(
-                "enter go  / filter  a attention  n next  r reply  y approve  s suspend",
+                "enter go  / filter  a attention  n next  r reply  y approve  s suspend  F fork",
                 dim,
             )),
             Mode::Filter => Line::from(Span::styled("type to filter  enter keep  esc clear", dim)),
@@ -814,9 +884,10 @@ impl View {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ))),
-                Row::Session { name, attached, .. } => {
+                Row::Session { name, attached, depth, .. } => {
+                    let indent = format!("{}{}", "  ".repeat(*depth + 1), if *depth > 0 { "└ " } else { "" });
                     let mut spans = vec![Span::styled(
-                        format!("  {name}"),
+                        format!("{indent}{name}"),
                         Style::default().add_modifier(Modifier::BOLD),
                     )];
                     if *attached {
@@ -914,8 +985,33 @@ mod tests {
     }
 
     #[test]
+    fn forks_nest_under_their_parent() {
+        let parents: HashMap<String, String> = [
+            ("b1", "a"),
+            ("b2", "a"),
+            ("c", "b1"),
+            ("orphan", "gone"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let got = nest_sessions(&["b2", "c", "a", "orphan", "b1", "z"], &parents);
+        assert_eq!(
+            got,
+            [
+                ("a", 0),
+                ("b2", 1),
+                ("b1", 1),
+                ("c", 2),
+                ("orphan", 0),
+                ("z", 0)
+            ]
+        );
+    }
+
+    #[test]
     fn rows_group_by_category_uncategorized_last() {
-        let rows = build_rows(&inv(), 1000, "", false, &no_prices());
+        let rows = build_rows(&inv(), 1000, "", false, &no_prices(), &HashMap::new());
         assert_eq!(
             labels(&rows),
             [
@@ -940,23 +1036,23 @@ mod tests {
     fn filter_and_attention_narrow_rows() {
         let inv = inv();
         assert_eq!(
-            labels(&build_rows(&inv, 1000, "SLIDE", false, &no_prices())),
+            labels(&build_rows(&inv, 1000, "SLIDE", false, &no_prices(), &HashMap::new())),
             ["# projects", "s gates", "w gates:1"]
         );
         // The category and the cwd match too.
         assert_eq!(
-            build_rows(&inv, 1000, "study", false, &no_prices()).len(),
+            build_rows(&inv, 1000, "study", false, &no_prices(), &HashMap::new()).len(),
             3
         );
         assert_eq!(
-            build_rows(&inv, 1000, "/tmp/main", false, &no_prices()).len(),
+            build_rows(&inv, 1000, "/tmp/main", false, &no_prices(), &HashMap::new()).len(),
             3
         );
         assert_eq!(
-            labels(&build_rows(&inv, 1000, "", true, &no_prices())),
+            labels(&build_rows(&inv, 1000, "", true, &no_prices(), &HashMap::new())),
             ["# projects", "s gates", "w gates:0"]
         );
-        assert!(build_rows(&inv, 1000, "nothing", false, &no_prices()).is_empty());
+        assert!(build_rows(&inv, 1000, "nothing", false, &no_prices(), &HashMap::new()).is_empty());
     }
 
     #[test]

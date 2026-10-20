@@ -131,7 +131,7 @@ pub(crate) fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn build_tmux_name(project: &str, task: &str, session: &str) -> String {
+pub fn build_tmux_name(project: &str, task: &str, session: &str) -> String {
     format!(
         "cm{sep}{}{sep}{}{sep}{}",
         sanitize(project),
@@ -1156,7 +1156,7 @@ pub fn run_command_session(label: &str, work_dir: &str, command: &str) -> Result
 /// Set the per-session showrunner environment: the agent id, and the daemon
 /// port so the plugin's hook script (`post-event.sh`) can reach the daemon even
 /// when `SESSIONIZER_PORT` isn't otherwise in the pane environment.
-fn set_session_env(tmux_name: &str, agent: AgentKind) {
+pub(crate) fn set_session_env(tmux_name: &str, agent: AgentKind) {
     let _ = Command::new("tmux")
         .args(["set-environment", "-t", tmux_name, "CM_AGENT", agent.id()])
         .output();

@@ -161,8 +161,76 @@ pub fn resume_command(kind: AgentKind, argv: &[String], session_id: Option<&str>
     out
 }
 
+/// The command forking agent session `session_id` into a new conversation:
+/// `argv` without the flags that pick a conversation, then
+/// `claude … --resume <id> --fork-session`, `opencode … -s <id> --fork` or
+/// `codex fork <id> …`. Other flags (`--model`, `--dangerously-skip-permissions`)
+/// are kept; a positional word that doesn't follow a flag is the initial prompt
+/// and is dropped. `None` when the agent can't fork (Pi) or there is no session
+/// id.
+pub fn fork_command(
+    kind: AgentKind,
+    argv: &[String],
+    session_id: Option<&str>,
+) -> Option<Vec<String>> {
+    let (Some(id), false) = (session_id, kind == AgentKind::Pi || argv.is_empty()) else {
+        return None;
+    };
+    let prog_len = (1 + usize::from(is_runtime(&argv[0]))).min(argv.len());
+    let (prog, args) = argv.split_at(prog_len);
+    let mut i = 0;
+    if kind == AgentKind::Codex && args.first().is_some_and(|a| a == "resume") {
+        i = 1 + usize::from(args.get(1).is_some_and(|a| !a.starts_with('-')));
+    }
+    let mut kept: Vec<String> = Vec::new();
+    let mut after_value_flag = false;
+    while i < args.len() {
+        let arg = &args[i];
+        i += 1;
+        let (flag, inline) = match arg.split_once('=') {
+            Some((f, _)) if arg.starts_with("--") => (f, true),
+            _ => (arg.as_str(), false),
+        };
+        if let Some(takes) = resume_flag(kind, flag) {
+            let next_is_value = args.get(i).is_some_and(|n| !n.starts_with('-'));
+            if !inline
+                && (takes == Takes::Value || (takes == Takes::OptionalValue && next_is_value))
+            {
+                i += 1;
+            }
+            after_value_flag = false;
+            continue;
+        }
+        if !arg.starts_with('-') && !after_value_flag {
+            continue;
+        }
+        after_value_flag = arg.starts_with('-') && !inline && !boolean_flag(arg);
+        kept.push(arg.clone());
+    }
+    let mut out = prog.to_vec();
+    match kind {
+        AgentKind::Codex => {
+            out.extend(["fork".to_string(), id.to_string()]);
+            out.extend(kept);
+        }
+        AgentKind::OpenCode => {
+            out.extend(kept);
+            out.extend(["-s".to_string(), id.to_string(), "--fork".to_string()]);
+        }
+        _ => {
+            out.extend(kept);
+            out.extend([
+                "--resume".to_string(),
+                id.to_string(),
+                "--fork-session".to_string(),
+            ]);
+        }
+    }
+    Some(out)
+}
+
 /// Join words into a shell command line, quoting only where needed.
-fn shell_join(words: &[String]) -> String {
+pub(crate) fn shell_join(words: &[String]) -> String {
     words
         .iter()
         .map(|w| {
@@ -605,6 +673,70 @@ mod tests {
             resume(AgentKind::Claude, "claude --resume home", None),
             "claude --resume home"
         );
+    }
+
+    fn fork(kind: AgentKind, argv: &str, id: Option<&str>) -> Option<String> {
+        fork_command(kind, &words(argv), id).map(|w| w.join(" "))
+    }
+
+    #[test]
+    fn claude_fork_table() {
+        use AgentKind::Claude;
+        let cases = [
+            ("claude", "claude --resume ID --fork-session"),
+            ("claude --resume old", "claude --resume ID --fork-session"),
+            (
+                "claude -r old --model sonnet",
+                "claude --model sonnet --resume ID --fork-session",
+            ),
+            (
+                "claude --session-id X --verbose",
+                "claude --verbose --resume ID --fork-session",
+            ),
+            (
+                "claude --dangerously-skip-permissions prompt",
+                "claude --dangerously-skip-permissions --resume ID --fork-session",
+            ),
+            ("node /x/cli.js --model m", "node /x/cli.js --model m --resume ID --fork-session"),
+        ];
+        for (argv, want) in cases {
+            assert_eq!(
+                fork(Claude, argv, Some("ID")),
+                Some(want.to_string()),
+                "argv {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_and_opencode_fork() {
+        assert_eq!(
+            fork(AgentKind::Codex, "codex --model o3 do-it", Some("ID")),
+            Some("codex fork ID --model o3".to_string())
+        );
+        assert_eq!(
+            fork(
+                AgentKind::Codex,
+                "codex resume old --dangerously-bypass-approvals-and-sandbox",
+                Some("ID")
+            ),
+            Some("codex fork ID --dangerously-bypass-approvals-and-sandbox".to_string())
+        );
+        assert_eq!(
+            fork(AgentKind::OpenCode, "opencode -s old -m x", Some("ID")),
+            Some("opencode -m x -s ID --fork".to_string())
+        );
+        assert_eq!(
+            fork(AgentKind::OpenCode, "opencode --continue", Some("ID")),
+            Some("opencode -s ID --fork".to_string())
+        );
+    }
+
+    #[test]
+    fn pi_and_missing_session_id_cannot_fork() {
+        assert_eq!(fork(AgentKind::Pi, "pi --x", Some("ID")), None);
+        assert_eq!(fork(AgentKind::Claude, "claude", None), None);
+        assert_eq!(fork(AgentKind::Claude, "", Some("ID")), None);
     }
 
     #[test]

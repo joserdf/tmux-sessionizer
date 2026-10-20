@@ -195,6 +195,12 @@ struct Suspend {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct Fork {
+    #[schemars(description = "tmux session name of the session to fork")]
+    session: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ListCards {
     #[schemars(description = "Only this board's cards (default: all boards)")]
     board: Option<String>,
@@ -575,6 +581,16 @@ impl Server {
     async fn suspend(&self, Parameters(p): Parameters<Suspend>) -> Out {
         self.act(move |inv, cfg| inv.suspend(cfg, &p.target, p.force.unwrap_or(false)))
             .await
+    }
+
+    #[tool(
+        description = "Fork a session's agent conversation into a new tmux session in the same worktree (Claude, Codex, OpenCode). The new session records the source as its parent"
+    )]
+    async fn fork(&self, Parameters(p): Parameters<Fork>) -> Out {
+        self.act(move |_, _| {
+            crate::ops::fork_session(&p.session).map(|n| json!({ "forked": n, "parent": p.session }))
+        })
+        .await
     }
 
     #[tool(description = "Run the resume command suspend (or a restore) pasted in a window")]

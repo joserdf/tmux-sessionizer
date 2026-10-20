@@ -1135,6 +1135,7 @@ async fn api_create_adhoc(
                 auto_closed: false,
                 agent: agent.id().to_string(),
                 board_card: None,
+                parent: None,
             },
         );
         Ok(tmux_name)

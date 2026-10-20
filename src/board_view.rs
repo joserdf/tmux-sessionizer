@@ -504,6 +504,7 @@ mod tests {
             auto_closed: false,
             agent: "claude".to_string(),
             board_card: board_card.map(str::to_string),
+            parent: None,
         }
     }
 

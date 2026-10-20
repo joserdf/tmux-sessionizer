@@ -35,6 +35,8 @@ Managing tasks and sessions (usable from inside a session):
   showrunner session create <project> <task> [--prompt <text>] [--no-worktree]
                                               [--agent claude|codex|pi]
   showrunner session kill <session> --yes
+  showrunner fork <session>                    fork a session's agent into a new
+                                                tmux session (same worktree)
 
 Talking to another session:
   showrunner ask <session> <question> [--timeout <secs>]
@@ -89,6 +91,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("list") => Some(cmd_list(rest)),
         Some("task") => Some(cmd_task(rest)),
         Some("session") => Some(cmd_session(rest)),
+        Some("fork") => Some(cmd_fork(rest)),
         Some("ask") => Some(cmd_ask(rest)),
         Some("send") => Some(cmd_send(rest)),
         Some("output") => Some(cmd_output(rest)),
@@ -810,6 +813,19 @@ fn cmd_session_kill(args: &[String]) -> Result<()> {
 
     ops::kill_session(&session.name)?;
     println!("killed session: {}", session_ref(&session));
+    Ok(())
+}
+
+fn cmd_fork(args: &[String]) -> Result<()> {
+    let (positional, _) = parse_args(args, &[], &[])?;
+    let [reference] = positional.as_slice() else {
+        bail!("usage: fork <session>");
+    };
+
+    let sessions = tmux::list_sessions().unwrap_or_default();
+    let session = resolve_session(reference, &sessions)?;
+    let tmux_name = ops::fork_session(&session.name)?;
+    println!("forked {} → {tmux_name}", session_ref(&session));
     Ok(())
 }
 

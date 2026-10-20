@@ -1,7 +1,7 @@
 //! Task and session operations shared by the HTTP server and the CLI, so both
 //! headless entry points create and delete things exactly like the TUI does.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::agent::AgentKind;
 use crate::config::{self, Config, Project};
@@ -54,6 +54,7 @@ pub fn create_task_session(
             auto_closed: false,
             agent: agent.id().to_string(),
             board_card: None,
+            parent: None,
         },
     );
 
@@ -221,6 +222,132 @@ pub fn kill_session(tmux_name: &str) -> Result<()> {
     tmux::kill_session_with_fallback(tmux_name, fallback)?;
     config::remove_session_record(tmux_name);
     Ok(())
+}
+
+/// The agent pane of a session in the last snapshot: its argv and the agent's
+/// own session id (what a fork resumes). Falls back to the bare agent binary
+/// when the snapshot has no argv for the pane.
+fn agent_pane(source_tmux_name: &str) -> Result<(Vec<String>, Option<String>)> {
+    let snap = crate::snapshot::load(&crate::snapshot::snapshot_path())
+        .ok_or_else(|| anyhow::anyhow!("no snapshot yet — the daemon must run once to fork"))?;
+    let session = snap
+        .sessions
+        .iter()
+        .find(|s| s.name == source_tmux_name)
+        .ok_or_else(|| anyhow::anyhow!("no snapshot for '{source_tmux_name}'"))?;
+    let pane = session
+        .windows
+        .iter()
+        .flat_map(|w| &w.panes)
+        .find(|p| p.agent.is_some())
+        .ok_or_else(|| anyhow::anyhow!("no agent pane in '{source_tmux_name}'"))?;
+    let agent = pane.agent.as_ref().context("no agent in pane")?;
+    let argv = pane
+        .argv
+        .clone()
+        .unwrap_or_else(|| vec![agent.kind.clone()]);
+    Ok((argv, agent.session_id.clone()))
+}
+
+/// Fork a session: a new tmux session in the same project/task/worktree dir
+/// (the fork shares the worktree, no new branch) running the agent's fork
+/// command. The new session's record links back to `source_tmux_name` as its
+/// `parent`.
+pub fn fork_session(source_tmux_name: &str) -> Result<String> {
+    let record = config::load_sessions()
+        .get(source_tmux_name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no session record for '{source_tmux_name}'"))?;
+    let kind = record.agent_kind();
+    let (argv, session_id) = agent_pane(source_tmux_name)?;
+    let cmd = crate::restore::fork_command(kind, &argv, session_id.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("{} has no fork support", kind.id()))?;
+
+    let work_dir = if record.use_worktree {
+        tmux::worktree_dir(&record.project_name, &record.task_name, &record.session_name)
+            .to_string_lossy()
+            .to_string()
+    } else {
+        record.project_path.clone()
+    };
+
+    let sessions = tmux::list_sessions().unwrap_or_default();
+    let session_name = tmux::next_session_number(
+        &record.project_name,
+        &record.task_name,
+        &sessions,
+    )
+    .to_string();
+    let tmux_name = tmux::build_tmux_name(&record.project_name, &record.task_name, &session_name);
+
+    let cmd_line = crate::restore::shell_join(&cmd);
+    let output = std::process::Command::new("tmux")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            &tmux_name,
+            "-c",
+            &work_dir,
+            &cmd_line,
+        ])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "failed to create tmux session: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let _ = std::process::Command::new("tmux")
+        .args([
+            "set-environment",
+            "-t",
+            &tmux_name,
+            "CM_PROJECT_PATH",
+            &record.project_path,
+        ])
+        .output();
+    let _ = std::process::Command::new("tmux")
+        .args([
+            "set-environment",
+            "-t",
+            &tmux_name,
+            "CM_TASK_BRANCH",
+            &record.task_branch,
+        ])
+        .output();
+    if record.use_worktree {
+        let _ = std::process::Command::new("tmux")
+            .args([
+                "set-environment",
+                "-t",
+                &tmux_name,
+                "CM_WORKTREE_PATH",
+                &work_dir,
+            ])
+            .output();
+    }
+    crate::tmux::set_session_env(&tmux_name, kind);
+
+    config::add_session_record(
+        &tmux_name,
+        config::SessionRecord {
+            project_name: record.project_name.clone(),
+            project_path: record.project_path.clone(),
+            task_name: record.task_name.clone(),
+            task_branch: record.task_branch.clone(),
+            session_name,
+            use_worktree: record.use_worktree,
+            archived: false,
+            auto_closed: false,
+            agent: kind.id().to_string(),
+            board_card: None,
+            parent: Some(source_tmux_name.to_string()),
+        },
+    );
+
+    Ok(tmux_name)
 }
 
 /// Look up a project by name in the loaded config.
