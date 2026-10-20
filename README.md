@@ -222,10 +222,17 @@ max_running = 2   # per-board cap
 
 ### Token usage & pricing
 
-Each session's token usage is parsed from its transcript (Claude and Codex;
-OpenCode and Pi aren't supported yet) and shown in `showrunner sessions` and
-`get_status`. Costing is opt-in: showrunner never guesses prices. Add a price
-per model (USD per million tokens) to `~/.showrunner/config.toml`:
+Each session's token usage is read from its transcript and shown per window in
+`showrunner sessions`, the resource panel (CPU/mem/GPU/tokens) and `get_status`:
+- **Claude** — summed from the JSONL transcript, deduped by message.
+- **Codex** — the transcript's last cumulative `token_count`.
+- **OpenCode** — the aggregated token columns in its SQLite db (via the
+  `sqlite3` CLI). This also covers Carcará: `carcara-coder` is OpenCode pointed
+  at the Carcará endpoint, so its sessions report tokens (cost `0`).
+- **Pi** — summed from the JSONL session file under its agent dir.
+
+Costing is opt-in: showrunner never guesses prices. Add a price per model (USD
+per million tokens) to `~/.showrunner/config.toml`:
 
 ```toml
 [pricing."claude-opus-5-5"]

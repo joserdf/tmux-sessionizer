@@ -268,15 +268,15 @@ fn usage_readout(
     p: &Pane,
     pricing: &HashMap<String, Pricing>,
 ) -> (String, Option<String>) {
-    let (Some(kind), Some(id)) = (
-        inv.state(p)
-            .and_then(|s| s.agent.as_deref())
-            .and_then(AgentKind::from_id),
-        inv.state(p).and_then(|s| s.agent_session_id.as_deref()),
-    ) else {
+    let Some(kind) = inv
+        .state(p)
+        .and_then(|s| s.agent.as_deref())
+        .and_then(AgentKind::from_id)
+    else {
         return (String::new(), None);
     };
-    let Some(usage) = crate::usage::token_usage(kind, id) else {
+    let id = inv.state(p).and_then(|s| s.agent_session_id.as_deref());
+    let Some(usage) = crate::usage::token_usage(kind, id, Some(p.cwd.as_str())) else {
         return (String::new(), None);
     };
     let tokens = crate::usage::human(usage.total());

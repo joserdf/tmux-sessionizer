@@ -493,10 +493,17 @@ pub struct App {
     /// Per-session CPU/mem, keyed by tmux session name. Populated by the
     /// background worker (sampled every 8th tick).
     pub resources: HashMap<String, SessionResources>,
+    /// Every pane on the tmux server, and the daemon's per-pane agent state;
+    /// from the worker update. Used to attribute token usage to a session.
+    pub panes: Vec<crate::inventory::Pane>,
+    pub pane_states: HashMap<String, crate::inventory::PaneState>,
     /// Per-session GPU memory (MiB), computed on demand when the resource panel
     /// opens (not on the worker tick).
     pub gpu_by_session: HashMap<String, u64>,
-    /// Whether the resource (CPU/mem/GPU) panel overlay is shown.
+    /// Per-session token readout (count + optional dollar cost), computed when
+    /// the resource panel opens. Keyed by tmux session name.
+    pub usage_by_session: HashMap<String, (String, Option<String>)>,
+    /// Whether the resource (CPU/mem/GPU/tokens) panel overlay is shown.
     pub show_resources: bool,
     /// Index into `theme::THEMES` of the active color theme.
     pub theme_index: usize,
@@ -784,7 +791,10 @@ impl App {
             pending_run: None,
             run_sessions: HashMap::new(),
             resources: HashMap::new(),
+            panes: Vec::new(),
+            pane_states: HashMap::new(),
             gpu_by_session: HashMap::new(),
+            usage_by_session: HashMap::new(),
             show_resources: false,
             theme_index: config::load_theme()
                 .map(|n| crate::theme::by_name(&n))
@@ -845,6 +855,8 @@ impl App {
             }
             self.run_sessions = update.run_sessions;
             self.resources = update.resources;
+            self.panes = update.panes;
+            self.pane_states = update.pane_states;
             self.rebuild_items();
         }
     }
@@ -2355,7 +2367,36 @@ impl App {
         self.show_resources = !self.show_resources;
         if self.show_resources {
             self.gpu_by_session = crate::resources::gpu_by_session();
+            self.usage_by_session = self.compute_usage_by_session();
         }
+    }
+
+    /// Per-session token count (and cost when the model is priced), read from
+    /// each session's agent pane on demand when the resource panel opens.
+    fn compute_usage_by_session(&self) -> HashMap<String, (String, Option<String>)> {
+        let mut out = HashMap::new();
+        for session in &self.sessions {
+            let Some(pane) = self.panes.iter().find(|p| {
+                p.session == session.name
+                    && self.pane_states.get(&p.id).is_some_and(|s| s.agent.is_some())
+            }) else {
+                continue;
+            };
+            let Some(st) = self.pane_states.get(&pane.id) else { continue };
+            let Some(kind) = st.agent.as_deref().and_then(AgentKind::from_id) else { continue };
+            let Some(usage) = crate::usage::token_usage(
+                kind,
+                st.agent_session_id.as_deref(),
+                Some(pane.cwd.as_str()),
+            ) else {
+                continue;
+            };
+            let tokens = crate::usage::human(usage.total());
+            let cost = crate::usage::cost(&usage, &self.config.pricing)
+                .map(|c| format!("${:.2}", c));
+            out.insert(session.name.clone(), (tokens, cost));
+        }
+        out
     }
 
     pub fn start_search(&mut self) {

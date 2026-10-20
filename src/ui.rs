@@ -379,7 +379,7 @@ fn draw_resource_panel(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let name_w = (inner.width.saturating_sub(24)).max(10) as usize;
+    let name_w = (inner.width.saturating_sub(47)).max(6) as usize;
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(current().muted);
 
@@ -388,7 +388,9 @@ fn draw_resource_panel(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!("{:<name_w$}  ", "SESSION"), bold),
         Span::styled(format!("{:>5}  ", "CPU%"), bold),
         Span::styled(format!("{:>7}  ", "MEM"), bold),
-        Span::styled(format!("{:>7}", "GPU"), bold),
+        Span::styled(format!("{:>7}  ", "GPU"), bold),
+        Span::styled(format!("{:>7}  ", "TOKENS"), bold),
+        Span::styled(format!("{:>7}", "COST"), bold),
     ]));
 
     let mut total_cpu = 0f32;
@@ -401,21 +403,37 @@ fn draw_resource_panel(f: &mut Frame, app: &App, area: Rect) {
         let cpu = res.map(|r| r.cpu_percent).unwrap_or(0.0);
         let mem_kb = res.map(|r| r.mem_kb).unwrap_or(0);
         let gpu_mib = app.gpu_by_session.get(&session.name).copied().unwrap_or(0);
+        let (tokens, cost) = app
+            .usage_by_session
+            .get(&session.name)
+            .cloned()
+            .unwrap_or_default();
         total_cpu += cpu;
         total_mem_kb += mem_kb;
         total_gpu_mib += gpu_mib;
         shown += 1;
 
         let name: String = session.name.chars().take(name_w).collect();
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::raw(format!("{name:<name_w$}  ")),
             Span::raw(format!("{:>5}  ", cpu as u32)),
             Span::raw(format!("{:>7}  ", mem_human(mem_kb))),
             Span::styled(
-                format!("{:>7}", if gpu_mib > 0 { format!("{gpu_mib}M") } else { "-".into() }),
+                format!("{:>7}  ", if gpu_mib > 0 { format!("{gpu_mib}M") } else { "-".into() }),
                 if gpu_mib > 0 { Style::default().fg(current().cyan) } else { dim },
             ),
-        ]));
+        ];
+        if tokens.is_empty() {
+            spans.push(Span::styled(format!("{:>7}  ", "-"), dim));
+            spans.push(Span::styled(format!("{:>7}", "-"), dim));
+        } else {
+            spans.push(Span::styled(format!("{:>7}  ", tokens), dim));
+            spans.push(Span::styled(
+                format!("{:>7}", cost.as_deref().unwrap_or("-")),
+                if cost.is_some() { Style::default().fg(current().cyan) } else { dim },
+            ));
+        }
+        lines.push(Line::from(spans));
     }
 
     if shown == 0 {

@@ -96,8 +96,9 @@ impl Inventory {
 
     /// The main agent pane's token usage, when its transcript is readable.
     fn window_token_usage(&self, pane: &Pane) -> Option<crate::usage::TokenUsage> {
-        let kind = AgentKind::from_id(self.state(pane)?.agent.as_deref()?)?;
-        crate::usage::token_usage(kind, self.state(pane)?.agent_session_id.as_deref()?)
+        let st = self.state(pane)?;
+        let kind = AgentKind::from_id(st.agent.as_deref()?)?;
+        crate::usage::token_usage(kind, st.agent_session_id.as_deref(), Some(pane.cwd.as_str()))
     }
 
     fn window_panes<'a>(&'a self, window_id: &'a str) -> impl Iterator<Item = &'a Pane> {
