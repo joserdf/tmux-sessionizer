@@ -231,6 +231,36 @@ max_running = 2   # per-board cap
 # [boards.columns]    provider state name -> canonical column
 ```
 
+#### Plane boards
+
+A self-hosted Plane (plane.so) project becomes a board; cards are its work
+items, dispatched the same way as native cards. The API key is read from the
+env var named by `api_key_env` (never stored in the config):
+
+```toml
+[[boards]]
+name = "roadmap"
+provider = "plane"
+project = "tmux-sessionizer"
+agent = "claude"
+max_running = 2
+
+[boards.plane]
+url = "https://plane.gmmsb.lncc.br"
+workspace = "joserdf"
+project_id = "abc-123"
+api_key_env = "PLANE_API_KEY"
+
+# Plane state name -> canonical column (optional; unlisted states fall back
+# by group: backlog/unstarted -> Backlog, started -> Running, completed -> Done,
+# cancelled -> skipped).
+[boards.columns]
+"Backlog" = "backlog"
+"Ready for agent" = "ready"
+"In Progress" = "running"
+"Done" = "done"
+```
+
 **Board view**: `showrunner board` (or `board view`, or `b` from the sessions
 view) opens a full-screen kanban. Cards sit in six columns; `h`/`l` and `j`/`k`
 navigate, `Tab` cycles boards. `Enter` switches the tmux client to the session

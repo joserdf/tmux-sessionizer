@@ -23,8 +23,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"]
 futures-core = "0.3"
 futures-util = "0.3"
 async-stream = "0.3"
-# HTTP client for the TUI to consume the daemon's SSE stream (http-only, no TLS).
-reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+# HTTP client for the TUI to consume the daemon's SSE stream and the Plane
+# task provider (blocking, JSON, TLS for the HTTPS self-hosted instances).
+reqwest = { version = "0.12", default-features = false, features = ["stream", "blocking", "json", "rustls-tls"] }
 rmcp = { version = "3.5.1", features = ["server", "macros", "transport-io"] }
 schemars = "1"
 

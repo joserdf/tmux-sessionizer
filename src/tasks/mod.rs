@@ -8,6 +8,7 @@
 
 pub mod dispatch;
 pub mod native;
+pub mod plane;
 pub mod web;
 
 use std::collections::HashMap;
@@ -240,8 +241,10 @@ pub struct JiraConfig {
 
 /// Build the concrete [`TaskProvider`] for a board. The native provider borrows
 /// the (in-memory) config so its mutations land straight in showrunner's tasks;
-/// a separate `Config::save()` persists them. Non-native providers are not
-/// implemented yet and fail loudly.
+/// a separate `Config::save()` persists them. The Plane provider connects to a
+/// self-hosted Plane instance (fetching its states and project identifier at
+/// construction) and needs the env var named by `plane.api_key_env` to be set.
+/// GitHub and Jira are not implemented yet and fail loudly.
 pub fn provider_for<'a>(
     config: &'a mut Config,
     board: &BoardConfig,
@@ -261,6 +264,16 @@ pub fn provider_for<'a>(
                     )
                 })?;
             Ok(Box::new(native::NativeProvider { project }))
+        }
+        ProviderKind::Plane => {
+            let plane = board
+                .plane
+                .as_ref()
+                .ok_or_else(|| anyhow!("board '{}': missing [boards.plane]", board.name))?;
+            Ok(Box::new(plane::PlaneProvider::connect(
+                plane,
+                board.columns.clone(),
+            )?))
         }
         other => bail!("provider '{other}' is not implemented yet"),
     }
