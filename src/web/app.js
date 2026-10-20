@@ -549,9 +549,22 @@ async function killSession() {
 // ---------- diff view ----------
 
 let diffQuery = null;
+// Pending review notes for the current diff, keyed `${file}\0${line}` (line is
+// "" for deleted lines). Kept across diff refreshes for the same session.
+let diffNotes = new Map();
+
+function diffSessionName() {
+  const m = /(?:^|[?&])session=([^&]*)/.exec(diffQuery || "");
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+function noteKey(file, line) {
+  return `${file}\u0000${line === null ? "" : line}`;
+}
 
 function openDiff(query, title) {
   diffQuery = query;
+  diffNotes.clear();
   $("dv-title").textContent = title;
   $("dv-stats").textContent = "";
   $("diff-body").textContent = "loading…";
@@ -561,6 +574,7 @@ function openDiff(query, title) {
 
 function closeDiff() {
   diffQuery = null;
+  diffNotes.clear();
   $("diff-view").hidden = true;
 }
 
@@ -600,6 +614,7 @@ function renderDiff(text) {
     return;
   }
 
+  const session = diffSessionName();
   for (const f of files) {
     const card = el("div", "file-card");
     const header = el("button", "file-header");
@@ -608,22 +623,25 @@ function renderDiff(text) {
     meta.append(el("span", "diff-added", `+${f.added}`), el("span", "diff-removed", `-${f.removed}`));
     header.append(meta);
     const content = el("pre", "file-diff");
-    let html = "";
-    for (const line of f.lines) {
-      const esc = escapeHtml(line) || " ";
+    for (const { text: t, line: n } of parseHunkLines(f.lines)) {
+      const span = el("span");
       let cls = "dl";
-      if (line.startsWith("+")) cls += " d-add";
-      else if (line.startsWith("-")) cls += " d-del";
-      else if (line.startsWith("@@")) cls += " d-hunk";
-      html += `<span class="${cls}">${esc}</span>`;
+      if (t.startsWith("+")) cls += " d-add";
+      else if (t.startsWith("-")) cls += " d-del";
+      else if (t.startsWith("@@")) cls += " d-hunk";
+      span.className = cls;
+      span.textContent = t || " ";
+      if (session) attachLineNote(span, f.path, n);
+      content.append(span);
     }
-    content.innerHTML = html;
     header.onclick = () => {
       content.hidden = !content.hidden;
     };
     card.append(header, content);
     body.append(card);
   }
+
+  if (session) body.append(renderNotesBar());
 }
 
 /// Split a unified diff into per-file chunks with counts; drops git metadata
@@ -653,6 +671,125 @@ function parseDiff(text) {
     else if (line.startsWith("-") && !line.startsWith("---")) cur.removed++;
   }
   return files;
+}
+
+/// Return each diff line with its new-side line number (null for deleted and
+/// non-content lines), parsed from hunk headers `@@ -a,b +c,d @@`.
+function parseHunkLines(lines) {
+  const out = [];
+  let newLine = null;
+  for (const text of lines) {
+    if (text.startsWith("@@")) {
+      const m = text.match(/@@ -[^ ]+ \+(\d+)/);
+      newLine = m ? parseInt(m[1], 10) : null;
+      out.push({ text, line: null });
+    } else if (text.startsWith("\\")) {
+      // "\ No newline at end of file" — not a content line.
+      out.push({ text, line: null });
+    } else if (text.startsWith("-")) {
+      out.push({ text, line: null });
+    } else {
+      out.push({ text, line: newLine });
+      if (newLine !== null) newLine++;
+    }
+  }
+  return out;
+}
+
+function attachLineNote(span, file, line) {
+  span.classList.add("d-noteable");
+  span.onclick = (ev) => {
+    ev.stopPropagation();
+    const next = span.nextElementSibling;
+    if (next && next.classList.contains("note-editor")) {
+      next.remove();
+      return;
+    }
+    const editor = el("div", "note-editor");
+    const ta = el("textarea");
+    ta.rows = 2;
+    ta.placeholder = line === null
+      ? `Note on deleted line in ${file}…`
+      : `Note on ${file}:${line}…`;
+    const row = el("div", "note-editor-actions");
+    const add = el("button", "note-add", "add note");
+    add.onclick = () => {
+      const val = ta.value.trim();
+      if (!val) return;
+      // Deleted lines share one key per file, so append rather than replace.
+      const key = noteKey(file, line);
+      const prev = diffNotes.get(key);
+      diffNotes.set(key, prev ? `${prev}\n${val}` : val);
+      refreshNotesBar();
+      editor.remove();
+    };
+    const cancel = el("button", "note-cancel", "✕");
+    cancel.onclick = () => editor.remove();
+    row.append(add, cancel);
+    editor.append(ta, row);
+    span.after(editor);
+    ta.focus();
+  };
+}
+
+function renderNotesBar() {
+  const bar = el("div", "notes-bar");
+  bar.id = "diff-notes";
+  updateNotesBar(bar);
+  return bar;
+}
+
+function refreshNotesBar() {
+  const bar = $("diff-notes");
+  if (bar) updateNotesBar(bar);
+}
+
+function updateNotesBar(bar) {
+  bar.textContent = "";
+  const count = diffNotes.size;
+  if (count === 0) {
+    bar.append(el("span", "notes-empty", "Click a diff line to leave a note."));
+    return;
+  }
+  const list = el("ul", "notes-list");
+  for (const [key, body] of diffNotes) {
+    const [file, line] = key.split("\u0000");
+    const item = el("li", "notes-item");
+    item.append(el("span", "notes-loc", `${file}${line ? ":" + line : ""}`));
+    item.append(el("span", "notes-body", body));
+    const remove = el("button", "note-remove", "✕");
+    remove.onclick = () => {
+      diffNotes.delete(key);
+      updateNotesBar(bar);
+    };
+    item.append(remove);
+    list.append(item);
+  }
+  bar.append(list);
+  const send = el("button", "note-send", `Send ${count} comment${count === 1 ? "" : "s"}`);
+  send.onclick = () => sendNotes();
+  bar.append(send);
+}
+
+async function sendNotes() {
+  const session = diffSessionName();
+  const comments = [];
+  for (const [key, body] of diffNotes) {
+    const [file, line] = key.split("\u0000");
+    comments.push({ file, line: line === "" ? null : parseInt(line, 10), body });
+  }
+  try {
+    await api(`/api/sessions/${encodeURIComponent(session)}/review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ comments }),
+    });
+    diffNotes.clear();
+    refreshNotesBar();
+    toast(`sent ${comments.length} comment${comments.length === 1 ? "" : "s"}`);
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 // ---------- new-task sheet ----------

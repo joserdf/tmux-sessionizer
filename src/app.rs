@@ -256,27 +256,23 @@ fn query_hunk_user_comments(cwd: &str) -> Option<Vec<HunkComment>> {
 }
 
 /// Format hunk review comments into a raw comment block (`- file:line — body`
-/// bullets). Wrapped by [`review_prompt`] before it's forwarded to the agent,
-/// the same way difit's extracted comment block is.
+/// bullets). Wrapped by [`crate::review::review_prompt`] before it's forwarded
+/// to the agent, the same way difit's extracted comment block is.
 fn format_hunk_comments(comments: &[HunkComment]) -> String {
-    comments
+    let parsed: Vec<crate::review::ReviewComment> = comments
         .iter()
-        .map(|c| {
-            let file = c.file_path.as_deref().unwrap_or("(unknown file)");
-            let line = c
+        .map(|c| crate::review::ReviewComment {
+            file: c.file_path.as_deref().unwrap_or("(unknown file)").to_string(),
+            line: c
                 .new_range
                 .as_ref()
                 .or(c.old_range.as_ref())
                 .and_then(|r| r.first())
-                .copied();
-            let body = c.body.as_deref().unwrap_or("").trim();
-            match line {
-                Some(l) => format!("- {file}:{l} — {body}"),
-                None => format!("- {file} — {body}"),
-            }
+                .copied(),
+            body: c.body.as_deref().unwrap_or("").to_string(),
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    crate::review::format_comments(&parsed)
 }
 
 /// Extract the review-comment block difit prints to stdout on exit. Returns
@@ -546,15 +542,6 @@ pub struct PendingReview {
     pub comments: String,
     /// Candidate sessions as `(tmux session name, display name)`.
     pub candidates: Vec<(String, String)>,
-}
-
-/// The prompt forwarded to an agent session carrying review comments (difit or
-/// hunk); `comments` is the tool's raw comment block.
-fn review_prompt(comments: &str) -> String {
-    format!(
-        "The following code review comments were left during review. \
-         Please address them:\n\n{comments}"
-    )
 }
 
 /// Modification time of config.toml, if it exists.
@@ -929,7 +916,7 @@ impl App {
     /// outcome in the status bar.
     fn forward_review_comments(&mut self, comments: &str, tmux_name: &str, display: &str) {
         self.status_message = Some(
-            match tmux::send_text(tmux_name, &review_prompt(comments), true) {
+            match tmux::send_text(tmux_name, &crate::review::review_prompt(comments), true) {
                 Ok(()) => format!("Forwarded review comments to {display}"),
                 Err(e) => format!("Failed to forward comments: {e}"),
             },
@@ -1874,7 +1861,7 @@ impl App {
                             // Exactly one candidate: forward straight away.
                             1 => {
                                 let (tmux_name, display) = &candidates[0];
-                                match tmux::send_text(tmux_name, &review_prompt(&comments), true) {
+                                match tmux::send_text(tmux_name, &crate::review::review_prompt(&comments), true) {
                                     Ok(()) => format!("Forwarded review comments to {display}"),
                                     Err(e) => format!("Failed to forward comments: {e}"),
                                 }
@@ -3778,7 +3765,7 @@ mod tests {
         // Falls back to oldRange when newRange is absent.
         assert!(out.contains("- src/g.txt:10 — Removed too much"));
         // Wrapped by the shared review prompt when forwarded.
-        assert!(review_prompt(&out).contains("Please address them"));
+        assert!(crate::review::review_prompt(&out).contains("Please address them"));
     }
 
     #[test]
@@ -3791,7 +3778,7 @@ mod tests {
 
     #[test]
     fn review_prompt_embeds_the_comments() {
-        let prompt = review_prompt("- rename foo\n- drop bar");
+        let prompt = crate::review::review_prompt("- rename foo\n- drop bar");
         assert!(prompt.contains("- rename foo"));
         assert!(prompt.contains("- drop bar"));
         assert!(prompt.contains("Please address them"));

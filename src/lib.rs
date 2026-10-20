@@ -18,6 +18,7 @@ pub mod notify;
 pub mod ops;
 pub mod resources;
 pub mod restore;
+pub mod review;
 pub mod search;
 pub mod server;
 pub mod sessions_view;

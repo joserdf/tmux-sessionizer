@@ -96,6 +96,7 @@ pub fn run(bind: &str) -> Result<()> {
         .route("/api/sessions/{name}/output", get(api_output))
         .route("/api/diff", get(api_diff))
         .route("/api/sessions/{name}/send", post(api_send))
+        .route("/api/sessions/{name}/review", post(api_review))
         .route("/api/sessions/{name}/keys", post(api_keys))
         .route("/api/sessions/{name}/kill", post(api_kill))
         .route("/api/projects", post(api_create_project))
@@ -470,6 +471,39 @@ mod sse_tests {
 }
 
 #[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    fn comment(file: &str, line: Option<i64>, body: &str) -> crate::review::ReviewComment {
+        crate::review::ReviewComment {
+            file: file.to_string(),
+            line,
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn rejects_empty_comment_list() {
+        assert!(validate_review_comments(&[]).is_err());
+    }
+
+    #[test]
+    fn rejects_comment_with_empty_body() {
+        assert!(validate_review_comments(&[comment("a.txt", Some(1), "   ")]).is_err());
+        assert!(validate_review_comments(&[comment("a.txt", Some(1), "")]).is_err());
+    }
+
+    #[test]
+    fn accepts_well_formed_comments() {
+        assert!(validate_review_comments(&[
+            comment("a.txt", Some(2), "rename this"),
+            comment("b.txt", None, "removed too much"),
+        ])
+        .is_ok());
+    }
+}
+
+#[cfg(test)]
 mod hook_tests {
     use super::*;
 
@@ -596,6 +630,41 @@ async fn api_send(
     .await
     .map_err(internal)?
     .map_err(internal)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct ReviewBody {
+    comments: Vec<crate::review::ReviewComment>,
+}
+
+/// Reject a review payload with no comments or any comment missing a body, so
+/// we never forward an empty/meaningless prompt to the agent.
+fn validate_review_comments(comments: &[crate::review::ReviewComment]) -> Result<(), ApiError> {
+    if comments.is_empty() {
+        return Err(bad_request("no comments"));
+    }
+    if comments.iter().any(|c| c.body.trim().is_empty()) {
+        return Err(bad_request("comment body must not be empty"));
+    }
+    Ok(())
+}
+
+/// Forward review comments to an agent session as a single prompt, formatted
+/// like the TUI's hunk/difit flow. Same access as `api_send`, which it wraps.
+async fn api_review(
+    Path(name): Path<String>,
+    axum::Json(body): axum::Json<ReviewBody>,
+) -> Result<StatusCode, ApiError> {
+    validate_session_name(&name)?;
+    validate_review_comments(&body.comments)?;
+
+    let prompt = crate::review::review_prompt(&crate::review::format_comments(&body.comments));
+    tokio::task::spawn_blocking(move || tmux::send_text(&name, &prompt, true))
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
 
     Ok(StatusCode::NO_CONTENT)
 }

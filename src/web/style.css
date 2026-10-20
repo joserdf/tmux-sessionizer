@@ -445,6 +445,55 @@ body::before {
 .d-del { color: var(--red); background: rgba(242, 109, 120, 0.08); }
 .d-hunk { color: var(--cyan); opacity: 0.7; }
 
+/* ---------- diff review notes ---------- */
+
+.d-noteable { cursor: pointer; }
+.d-noteable:hover { outline: 1px solid var(--faint); }
+
+.note-editor {
+  white-space: normal;
+  margin: 4px 0;
+  padding: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.note-editor textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 4px;
+  resize: vertical;
+}
+.note-editor-actions { display: flex; gap: 6px; margin-top: 4px; }
+
+.notes-bar {
+  position: sticky;
+  bottom: 0;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 12px;
+}
+.notes-empty { color: var(--dim); }
+.notes-list { list-style: none; margin-bottom: 6px; }
+.notes-item { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; }
+.notes-loc { color: var(--cyan); flex-shrink: 0; }
+.notes-body { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.note-editor button, .notes-bar button {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.note-add, .note-send { border-color: var(--amber) !important; color: var(--amber) !important; }
+
 /* ---------- sheet ---------- */
 
 #sheet-backdrop {
