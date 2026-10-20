@@ -8,6 +8,7 @@
 
 pub mod dispatch;
 pub mod native;
+pub mod web;
 
 use std::collections::HashMap;
 use std::fmt;

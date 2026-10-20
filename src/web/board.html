@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  <meta name="theme-color" content="#0b0d12" />
+  <title>showrunner · board</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/board.css" />
+</head>
+<body>
+  <header class="board-header">
+    <a class="brand" href="/">
+      <span class="brand-mark"><svg viewBox="0 0 100 100" fill="currentColor"><path d="M78 14 L38 14 L22 40 L62 40 Z"/><path d="M22 86 L62 86 L78 60 L38 60 Z"/></svg></span>
+      <span class="brand-name">show<b>runner</b></span>
+    </a>
+    <div class="board-toolbar">
+      <select id="board-select" aria-label="board"></select>
+      <span class="board-project" id="board-project"></span>
+      <span class="pause-chip" id="pause-chip" hidden>paused</span>
+    </div>
+    <div class="board-actions">
+      <button id="dry-run-btn">dry run</button>
+      <button id="dispatch-btn" class="accent">dispatch now</button>
+      <button id="pause-btn">pause</button>
+    </div>
+  </header>
+  <main id="board">
+    <div class="empty" id="loading">connecting…</div>
+  </main>
+  <div id="toast" hidden></div>
+  <script src="/board.js"></script>
+</body>
+</html>

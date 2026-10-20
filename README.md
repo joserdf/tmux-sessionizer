@@ -113,7 +113,11 @@ Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
   OpenCode (auto-loaded plugin), and Codex (`notify` on turn-complete); Pi uses
   the pane-scrape fallback
 - Project auto-discovery (`showrunner discover` — git / zoxide / ghq)
-- Daemon with HTTP + SSE on localhost, plus a small web UI
+- Daemon with HTTP + SSE on localhost, plus a small web UI with a kanban board
+  at `/board` (live via `/events` SSE + a 5s poll fallback)
+- Board API: `GET /api/v2/boards`, `POST /api/v2/boards/{name}/cards/move`
+  (`{id, column}`), `POST /api/v2/boards/dispatch` (`{dry_run}`), and
+  `POST /api/v2/boards/pause` (`{paused}`); mutations are loopback-only
 - TUI consumes the daemon's SSE (`/events/worker`) as its live data source. When
   the daemon isn't running at startup, or dies mid-session, the TUI falls back to
   a local in-process prober (and shows a "daemon down" indicator in the header),

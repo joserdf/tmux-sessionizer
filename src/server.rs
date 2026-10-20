@@ -80,6 +80,13 @@ pub fn run(bind: &str) -> Result<()> {
         .route("/api/v2/sessions/{name}/category", post(api_set_category))
         .route("/api/v2/pane-states", get(api_pane_states))
         .route("/api/v2/queue", get(api_queue_get).post(api_queue_push))
+        .route("/api/v2/boards", get(api_boards))
+        .route("/api/v2/boards/{name}/cards/move", post(api_board_move))
+        .route("/api/v2/boards/dispatch", post(api_board_dispatch))
+        .route("/api/v2/boards/pause", post(api_board_pause))
+        .route("/board", get(board_page))
+        .route("/board.js", get(board_js))
+        .route("/board.css", get(board_css))
         .with_state(state);
 
     // Task-board dispatcher loop: polls every `[dispatch] poll_secs` (default 60),
@@ -655,6 +662,112 @@ async fn api_queue_get(State(state): State<Arc<ServerState>>) -> axum::Json<Valu
     axum::Json(json!({ "queues": pending }))
 }
 
+/// All native kanban boards with their cards, for `/board`.
+async fn api_boards() -> Result<axum::Json<Value>, ApiError> {
+    let boards = tokio::task::spawn_blocking(|| {
+        let mut cfg = Config::load().map_err(internal)?;
+        let sessions = config::load_sessions();
+        crate::tasks::web::boards_json(&mut cfg, &sessions).map_err(internal)
+    })
+    .await
+    .map_err(internal)??;
+    Ok(axum::Json(Value::Array(boards)))
+}
+
+#[derive(Deserialize)]
+struct MoveCardBody {
+    id: String,
+    column: String,
+}
+
+/// Move one card to another column on a board. Local-only.
+async fn api_board_move(
+    Path(name): Path<String>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    axum::Json(body): axum::Json<MoveCardBody>,
+) -> Result<StatusCode, ApiError> {
+    if !hook_source_allowed(peer) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "board moves are local-only".to_string(),
+        ));
+    }
+    let column = serde_json::from_value::<crate::tasks::Column>(json!(body.column))
+        .map_err(|_| bad_request(format!("unknown column '{}'", body.column)))?;
+
+    let result = tokio::task::spawn_blocking(move || -> Result<(), (StatusCode, String)> {
+        // Load, apply and save under the config lock so a concurrent
+        // dispatcher write isn't clobbered.
+        let mut result = Ok(());
+        Config::modify(|cfg| {
+            let Some(board) = cfg.boards.iter().find(|b| b.name == name).cloned() else {
+                result = Err((StatusCode::NOT_FOUND, format!("board '{name}' not found")));
+                return;
+            };
+            result = crate::tasks::provider_for(cfg, &board)
+                .map_err(internal)
+                .and_then(|mut p| {
+                    p.move_to(&crate::tasks::CardId(body.id.clone()), column)
+                        .map_err(|_| bad_request(format!("card '{}' not found", body.id)))
+                });
+        })
+        .map_err(internal)?;
+        result
+    })
+    .await
+    .map_err(internal)?;
+    result.map(|_| StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct DispatchBody {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Run one dispatch pass. Local-only.
+async fn api_board_dispatch(
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    axum::Json(body): axum::Json<DispatchBody>,
+) -> Result<axum::Json<Value>, ApiError> {
+    if !hook_source_allowed(peer) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "dispatch is local-only".to_string(),
+        ));
+    }
+    let summary = tokio::task::spawn_blocking(move || {
+        let s = crate::tasks::dispatch::dispatch_once(body.dry_run).map_err(internal)?;
+        Ok::<_, ApiError>(crate::tasks::web::dispatch_summary_json(&s))
+    })
+    .await
+    .map_err(internal)??;
+    Ok(axum::Json(summary))
+}
+
+#[derive(Deserialize)]
+struct PauseBody {
+    paused: bool,
+}
+
+/// Pause or resume the dispatcher. Local-only.
+async fn api_board_pause(
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    axum::Json(body): axum::Json<PauseBody>,
+) -> Result<StatusCode, ApiError> {
+    if !hook_source_allowed(peer) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "pause is local-only".to_string(),
+        ));
+    }
+    tokio::task::spawn_blocking(move || crate::tasks::dispatch::set_paused(body.paused))
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 struct CategoryBody {
     /// `null` or `""` clears the category.
@@ -984,6 +1097,22 @@ async fn index() -> Response {
         Html(include_str!("web/index.html")),
     )
         .into_response()
+}
+
+async fn board_page() -> Response {
+    (
+        [(header::CACHE_CONTROL, "no-cache")],
+        Html(include_str!("web/board.html")),
+    )
+        .into_response()
+}
+
+async fn board_js() -> Response {
+    static_file("application/javascript", include_str!("web/board.js"))
+}
+
+async fn board_css() -> Response {
+    static_file("text/css", include_str!("web/board.css"))
 }
 
 async fn app_js() -> Response {
