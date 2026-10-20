@@ -107,6 +107,14 @@ impl Default for DispatchConfig {
     }
 }
 
+impl DispatchConfig {
+    /// Whether this is the untouched default, so a config without a
+    /// `[dispatch]` table serializes without one.
+    pub fn is_default(&self) -> bool {
+        *self == DispatchConfig::default()
+    }
+}
+
 /// Which backend a board reads from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -343,6 +351,36 @@ api_key_env = "PLANE_API_KEY"
         assert_eq!(config.dispatch.max_running, 2);
         assert_eq!(config.dispatch.poll_secs, 60);
         assert!(config.boards.is_empty());
+    }
+
+    #[test]
+    fn default_config_serializes_without_board_settings() {
+        let s = toml::to_string(&Config::default()).unwrap();
+        assert!(!s.contains("boards"), "unexpected boards in: {s}");
+        assert!(!s.contains("[dispatch]"), "unexpected [dispatch] in: {s}");
+    }
+
+    #[test]
+    fn configured_boards_round_trip_through_save_format() {
+        let mut config = Config::default();
+        config.dispatch.max_running = 3;
+        config.dispatch.poll_secs = 30;
+        config.boards.push(BoardConfig {
+            name: "b".to_string(),
+            provider: ProviderKind::Native,
+            project: "tmux-sessionizer".to_string(),
+            agent: Some("claude".to_string()),
+            max_running: 2,
+            prompt_template: Some("~/.showrunner/prompts/task.md".to_string()),
+            plane: None,
+            github: None,
+            jira: None,
+            columns: HashMap::from([("In Progress".to_string(), Column::Running)]),
+        });
+        let serialized = toml::to_string(&config).unwrap();
+        let back: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(back.dispatch, config.dispatch);
+        assert_eq!(back.boards, config.boards);
     }
 
     #[test]

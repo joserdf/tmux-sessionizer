@@ -560,11 +560,12 @@ pub struct Config {
     /// The MCP server (`showrunner mcp`). A table.
     #[serde(default)]
     pub mcp: crate::mcp::McpConfig,
-    /// Global task-board dispatch loop settings. A table.
-    #[serde(default)]
+    /// Global task-board dispatch loop settings. A table, only written once
+    /// configured.
+    #[serde(default, skip_serializing_if = "crate::tasks::DispatchConfig::is_default")]
     pub dispatch: crate::tasks::DispatchConfig,
     /// Task boards (kanban columns dispatched to agent sessions). Tables.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boards: Vec<crate::tasks::BoardConfig>,
 }
 
