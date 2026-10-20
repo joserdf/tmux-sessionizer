@@ -82,6 +82,10 @@ pub fn run(bind: &str) -> Result<()> {
         .route("/api/v2/queue", get(api_queue_get).post(api_queue_push))
         .with_state(state);
 
+    // Task-board dispatcher loop: polls every `[dispatch] poll_secs` (default 60),
+    // spawns Ready cards as agent sessions, and is a cheap no-op with no boards.
+    crate::tasks::dispatch::spawn_dispatcher();
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -962,6 +966,7 @@ async fn api_create_adhoc(
                 archived: false,
                 auto_closed: false,
                 agent: agent.id().to_string(),
+                board_card: None,
             },
         );
         Ok(tmux_name)

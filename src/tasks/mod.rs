@@ -6,6 +6,7 @@
 //! off these boards and hand them to agent sessions; Plane / GitHub / Jira
 //! providers will be built on top of the same trait.
 
+pub mod dispatch;
 pub mod native;
 
 use std::collections::HashMap;

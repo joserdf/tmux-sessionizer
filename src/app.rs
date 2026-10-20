@@ -2721,6 +2721,7 @@ impl App {
                             archived: false,
                             auto_closed: false,
                             agent: agent.id().to_string(),
+                            board_card: None,
                         },
                     );
                     let task_msg = if branch_exists {
@@ -2812,6 +2813,7 @@ impl App {
                             archived: false,
                             auto_closed: false,
                             agent: agent.id().to_string(),
+                            board_card: None,
                         },
                     );
                     OpResult {
@@ -2944,6 +2946,7 @@ impl App {
                             archived: false,
                             auto_closed: false,
                             agent: agent.id().to_string(),
+                            board_card: None,
                         },
                     );
                     OpResult {

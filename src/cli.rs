@@ -64,6 +64,12 @@ MCP server (lets a coding agent list, read, message and manage sessions):
   showrunner mcp                                serve on stdio, e.g.
                                                 `claude mcp add showrunner -- showrunner mcp`
 
+Task boards (native provider; Plane/GitHub/Jira later):
+  showrunner board list [--board <name>]       print each board's cards by column
+  showrunner board dispatch [--dry-run]         run one dispatch pass
+  showrunner board pause|resume                pause/resume auto-dispatch
+  showrunner board status                       pause state + per-board counts
+
 <session> is a ref from `list` — `<project>/<task>/<session>`, `<project>/<task>`
 for that task's main session, or a raw tmux session name.
 ";
@@ -83,6 +89,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("discover") => Some(cmd_discover(rest)),
         Some("hooks") => Some(crate::hooks_install::cmd_hooks(rest)),
         Some("category") => Some(crate::category::cmd_category(rest)),
+        Some("board") => Some(cmd_board(rest)),
         Some("restore") => Some(cmd_restore(rest)),
         Some("closed") => Some(cmd_closed(rest)),
         Some("reopen") => Some(cmd_reopen(rest)),
@@ -164,6 +171,118 @@ fn print_report(r: &crate::restore::Report) {
     for e in &r.errors {
         eprintln!("error: {e}");
     }
+}
+
+fn cmd_board(args: &[String]) -> Result<()> {
+    use crate::tasks::dispatch;
+
+    match args.first().map(String::as_str) {
+        Some("list") => cmd_board_list(&args[1..]),
+        Some("dispatch") => cmd_board_dispatch(&args[1..]),
+        Some("pause") => {
+            dispatch::set_paused(true)?;
+            println!("board dispatch paused");
+            Ok(())
+        }
+        Some("resume") => {
+            dispatch::set_paused(false)?;
+            println!("board dispatch resumed");
+            Ok(())
+        }
+        Some("status") => cmd_board_status(&args[1..]),
+        Some(other) => bail!(
+            "unknown board command '{other}' (expected list, dispatch, pause, resume or status)"
+        ),
+        None => bail!(
+            "usage: board list [--board <name>] | board dispatch [--dry-run] | board pause | \
+             board resume | board status"
+        ),
+    }
+}
+
+fn cmd_board_list(args: &[String]) -> Result<()> {
+    use crate::tasks::Column;
+    let (_, flags) = parse_args(args, &["board"], &[])?;
+    let filter = flags.get("board").map(String::as_str);
+    let mut cfg = Config::load()?;
+    for listing in crate::tasks::dispatch::board_cards(&mut cfg)? {
+        if let Some(f) = filter
+            && listing.name != f
+        {
+            continue;
+        }
+        println!("[{}]", listing.name);
+        for col in [
+            Column::Backlog,
+            Column::Ready,
+            Column::Running,
+            Column::NeedsYou,
+            Column::Review,
+            Column::Done,
+        ] {
+            let cards: Vec<&crate::tasks::Card> =
+                listing.cards.iter().filter(|c| c.column == col).collect();
+            if cards.is_empty() {
+                continue;
+            }
+            println!("  {}", column_label(col));
+            for c in cards {
+                println!("    {}  {}  {}", c.id.0, c.key, c.title);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn column_label(col: crate::tasks::Column) -> &'static str {
+    use crate::tasks::Column;
+    match col {
+        Column::Backlog => "backlog",
+        Column::Ready => "ready",
+        Column::Running => "running",
+        Column::NeedsYou => "needs you",
+        Column::Review => "review",
+        Column::Done => "done",
+    }
+}
+
+fn cmd_board_dispatch(args: &[String]) -> Result<()> {
+    let (_, flags) = parse_args(args, &[], &["dry-run"])?;
+    let dry_run = flags.contains_key("dry-run");
+    let summary = crate::tasks::dispatch::dispatch_once(dry_run)?;
+    if dry_run {
+        println!("dry run: would dispatch {} card(s)", summary.dispatched);
+    } else {
+        println!("dispatched {} card(s)", summary.dispatched);
+    }
+    for b in &summary.boards {
+        println!(
+            "  {}: running {} ready {} dispatched {}",
+            b.name,
+            b.running,
+            b.ready,
+            b.dispatched.len()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_board_status(args: &[String]) -> Result<()> {
+    parse_args(args, &[], &[])?;
+    let paused = crate::tasks::dispatch::is_paused();
+    println!(
+        "board dispatch: {}",
+        if paused { "paused" } else { "active" }
+    );
+    let mut cfg = Config::load()?;
+    let sessions = crate::config::load_sessions();
+    for st in crate::tasks::dispatch::board_status(&mut cfg, &sessions)? {
+        println!(
+            "  {}: running {} ready {} needs-you {}",
+            st.name, st.running, st.ready, st.needs_you
+        );
+    }
+    Ok(())
 }
 
 fn cmd_restore(args: &[String]) -> Result<()> {

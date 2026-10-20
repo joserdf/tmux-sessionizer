@@ -736,6 +736,11 @@ pub struct SessionRecord {
     /// tracked default to "claude".
     #[serde(default = "default_agent_id")]
     pub agent: String,
+    /// The board card this session serves (its card id), if any. A card with
+    /// a live or archived session record for the project is never dispatched
+    /// twice, including after a daemon restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_card: Option<String>,
 }
 
 impl SessionRecord {
@@ -802,6 +807,18 @@ pub fn set_session_auto_closed(tmux_name: &str, auto_closed: bool) {
             rec.auto_closed = auto_closed;
             let _ = save_sessions(&sessions);
         }
+    }
+}
+
+/// Set (or clear) the `board_card` on a session record and persist. No-op
+/// if the record doesn't exist. Used by the board dispatcher so a card
+/// is never dispatched twice.
+pub fn set_session_record_board_card(tmux_name: &str, board_card: String) {
+    let _g = IO_LOCK.lock().unwrap();
+    let mut sessions = load_sessions();
+    if let Some(rec) = sessions.get_mut(tmux_name) {
+        rec.board_card = Some(board_card);
+        let _ = save_sessions(&sessions);
     }
 }
 
@@ -1441,6 +1458,7 @@ mod migration_tests {
             archived: false,
             auto_closed: false,
             agent: default_agent_id(),
+            board_card: None,
         };
         assert!(record.belongs_to("My Project", "Fix Bug"));
         // Sanitized forms must not match: records persist raw names.

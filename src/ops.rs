@@ -53,6 +53,7 @@ pub fn create_task_session(
             archived: false,
             auto_closed: false,
             agent: agent.id().to_string(),
+            board_card: None,
         },
     );
 
