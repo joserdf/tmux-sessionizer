@@ -22,7 +22,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::config::{Config, SessionRecord};
 use crate::tasks::dispatch;
-use crate::tasks::{Card, CardId, Column, ProviderKind, provider_for};
+use crate::tasks::{Card, CardId, Column, provider_for};
 
 /// How often the board re-reads config and cards from disk.
 const REFRESH: Duration = Duration::from_secs(2);
@@ -129,15 +129,12 @@ struct BoardCards {
     cards: Vec<Card>,
 }
 
-/// Load every native board's cards. Non-native boards are skipped; a board
-/// whose provider can't be built (e.g. a missing project) is skipped too.
+/// Load every board's cards. A board whose provider can't be built or listed
+/// (e.g. a missing project or an unreachable Plane instance) is skipped.
 fn native_boards(cfg: &mut Config) -> Vec<BoardCards> {
     let boards = cfg.boards.clone();
     let mut out = Vec::new();
     for board in &boards {
-        if board.provider != ProviderKind::Native {
-            continue;
-        }
         let Ok(provider) = provider_for(cfg, board) else { continue };
         let Ok(cards) = provider.list() else { continue };
         out.push(BoardCards {
@@ -480,6 +477,7 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::ProviderKind;
 
     fn card(id: &str, col: Column) -> Card {
         Card {

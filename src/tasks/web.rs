@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::config::{Config, SessionRecord};
 use crate::tasks::{
-    BoardConfig, Card, CardId, Column, ProviderKind, provider_for,
+    BoardConfig, Card, CardId, Column, provider_for,
 };
 
 /// Canonical column order, left to right across the board.
@@ -83,7 +83,8 @@ pub fn board_json(
     }))
 }
 
-/// Every native board as a JSON array, in config order.
+/// Every board as a JSON array, in config order. A board whose provider
+/// fails (e.g. an unreachable Plane instance) is logged and skipped.
 pub fn boards_json(
     cfg: &mut Config,
     sessions: &HashMap<String, SessionRecord>,
@@ -91,10 +92,10 @@ pub fn boards_json(
     let boards = cfg.boards.clone();
     let mut out = Vec::new();
     for board in &boards {
-        if board.provider != ProviderKind::Native {
-            continue;
+        match board_json(cfg, board, sessions) {
+            Ok(v) => out.push(v),
+            Err(e) => eprintln!("board {}: {e:#}", board.name),
         }
-        out.push(board_json(cfg, board, sessions)?);
     }
     Ok(out)
 }
@@ -120,6 +121,7 @@ pub fn column_at(index: usize) -> Option<Column> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::ProviderKind;
     use crate::config::Task;
 
     fn card_task(name: &str, branch: &str, col: Column) -> Task {
@@ -233,7 +235,8 @@ mod tests {
     }
 
     #[test]
-    fn board_dto_skips_non_native_boards() {
+    fn board_dto_skips_boards_whose_provider_fails() {
+        // GitHub is not implemented yet, so building its provider fails.
         let mut cfg = Config::default();
         cfg.boards.push(BoardConfig {
             name: "remote".to_string(),

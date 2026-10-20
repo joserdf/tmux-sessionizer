@@ -17,7 +17,7 @@ use crate::config::{self, Config, Project, SessionRecord};
 use crate::inventory::AgentStatus;
 use crate::ops;
 use crate::tasks::{
-    BoardConfig, Card, CardId, Column, Link, ProviderKind, provider_for,
+    BoardConfig, Card, CardId, Column, Link, provider_for,
 };
 use crate::tmux;
 
@@ -487,13 +487,13 @@ pub fn dispatch_cfg(
     let mut global_running = 0;
     let boards = cfg.boards.clone();
     for board in &boards {
-        if board.provider != ProviderKind::Native {
-            continue;
-        }
-
-        let cards = {
-            let provider = provider_for(cfg, board)?;
-            provider.list()?
+        // A remote board that can't be reached must not stop the others.
+        let cards = match provider_for(cfg, board).and_then(|p| p.list()) {
+            Ok(cards) => cards,
+            Err(e) => {
+                eprintln!("dispatcher: board {}: {e:#}", board.name);
+                continue;
+            }
         };
         let project = ops::find_project(&*cfg, &board.project)?;
         let project_path = project.path.clone();
@@ -692,9 +692,6 @@ pub fn board_cards(cfg: &mut Config) -> Result<Vec<BoardCards>> {
     let mut out = Vec::new();
     let boards = cfg.boards.clone();
     for board in &boards {
-        if board.provider != ProviderKind::Native {
-            continue;
-        }
         let provider = provider_for(cfg, board)?;
         out.push(BoardCards {
             name: board.name.clone(),
@@ -719,9 +716,6 @@ pub fn board_status(
     let mut out = Vec::new();
     let boards = cfg.boards.clone();
     for board in &boards {
-        if board.provider != ProviderKind::Native {
-            continue;
-        }
         let cards = {
             let provider = provider_for(cfg, board)?;
             provider.list()?
@@ -768,6 +762,7 @@ pub fn spawn_dispatcher() -> std::thread::JoinHandle<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::ProviderKind;
     use crate::config::Task;
 
     fn card_task(name: &str, branch: &str, col: Column) -> Task {
