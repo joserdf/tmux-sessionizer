@@ -46,6 +46,8 @@ pub fn run() -> Result<()> {
         crate::tmux::attach_session_window(&session, index as usize)?;
     } else if view.projects {
         std::process::Command::new(std::env::current_exe()?).status()?;
+    } else if view.boards {
+        crate::board_view::run()?;
     }
     Ok(())
 }
@@ -345,6 +347,7 @@ struct View {
     wake: Sender<()>,
     goto: Option<(String, u32)>,
     projects: bool,
+    boards: bool,
     quit: bool,
     /// Token prices (USD per million tokens) per model, for the cost readout.
     pricing: HashMap<String, Pricing>,
@@ -366,6 +369,7 @@ impl View {
             wake,
             goto: None,
             projects: false,
+            boards: false,
             quit: false,
             pricing: HashMap::new(),
         }
@@ -592,6 +596,10 @@ impl View {
                 self.projects = true;
                 self.quit = true;
             }
+            KeyCode::Char('b') => {
+                self.boards = true;
+                self.quit = true;
+            }
             KeyCode::Char('u') => {
                 let mut entries = snapshot::load_closed();
                 // Newest first, as `showrunner closed list` shows them.
@@ -778,7 +786,7 @@ impl View {
             Mode::Closed(..) => Line::from(Span::styled("enter reopen  esc back", dim)),
         };
         let keys = Line::from(Span::styled(
-            "c category  R rename  x close  u reopen  p projects  q quit",
+            "c category  R rename  x close  u reopen  b board  p projects  q quit",
             dim,
         ));
         f.render_widget(Paragraph::new(vec![hint, keys]), footer);

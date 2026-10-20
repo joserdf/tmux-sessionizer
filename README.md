@@ -227,6 +227,12 @@ max_running = 2   # per-board cap
 # [boards.columns]    provider state name -> canonical column
 ```
 
+**Board view**: `showrunner board` (or `board view`, or `b` from the sessions
+view) opens a full-screen kanban. Cards sit in six columns; `h`/`l` and `j`/`k`
+navigate, `Tab` cycles boards. `Enter` switches the tmux client to the session
+serving a card, `m` moves it to another column, `D` runs one dispatch pass, `p`
+toggles dispatch pause and `r` reloads (it also auto-reloads every ~2s).
+
 ### Token usage & pricing
 
 Each session's token usage is read from its transcript and shown per window in

@@ -65,6 +65,8 @@ MCP server (lets a coding agent list, read, message and manage sessions):
                                                 `claude mcp add showrunner -- showrunner mcp`
 
 Task boards (native provider; Plane/GitHub/Jira later):
+  showrunner board                            TUI kanban board view
+  showrunner board view                       open the board view
   showrunner board list [--board <name>]       print each board's cards by column
   showrunner board dispatch [--dry-run]         run one dispatch pass
   showrunner board pause|resume                pause/resume auto-dispatch
@@ -190,12 +192,9 @@ fn cmd_board(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("status") => cmd_board_status(&args[1..]),
+        Some("view") | None => crate::board_view::run(),
         Some(other) => bail!(
-            "unknown board command '{other}' (expected list, dispatch, pause, resume or status)"
-        ),
-        None => bail!(
-            "usage: board list [--board <name>] | board dispatch [--dry-run] | board pause | \
-             board resume | board status"
+            "unknown board command '{other}' (expected view, list, dispatch, pause, resume or status)"
         ),
     }
 }
