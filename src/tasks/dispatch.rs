@@ -14,65 +14,96 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::config::{self, Config, Project, SessionRecord};
+use crate::inventory::AgentStatus;
 use crate::ops;
 use crate::tasks::{
     BoardConfig, Card, CardId, Column, Link, ProviderKind, provider_for,
 };
 use crate::tmux;
 
-/// Coarse status of a dispatched card's session, derived from a tmux probe.
+/// Status of a dispatched card's session: the daemon's hook-derived
+/// `@agent_status` (via a tmux probe) plus whether the session is alive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchSessionStatus {
-    /// Agent alive and not blocked on a prompt.
+    /// Agent actively working — card stays (or returns to) Running.
     Alive,
-    /// Agent is asking the user something (permission / question / error).
+    /// Agent idle: not producing. Finished only once its branch has commits.
+    Idle,
+    /// Agent is asking the user (question / permission / error).
     NeedsAttention,
-    /// Session or agent is gone.
+    /// Agent finished its turn (`done`): the result is ready to review.
+    Finished,
+    /// Session or agent process is gone.
     Gone,
 }
 
-/// Map a probe result onto a coarse status.
-fn probe_to_status(probe: Option<&tmux::SessionProbe>) -> DispatchSessionStatus {
+/// Map a probe result onto a status, using the rich hook status when the
+/// session is alive and falling back to the coarse dialog check otherwise.
+fn probe_to_status(
+    probe: Option<&tmux::SessionProbe>,
+    agent: Option<AgentStatus>,
+) -> DispatchSessionStatus {
     match probe {
         None => DispatchSessionStatus::Gone,
         Some(p) if !p.agent_alive => DispatchSessionStatus::Gone,
         Some(p) if p.has_permission_prompt => DispatchSessionStatus::NeedsAttention,
-        Some(_) => DispatchSessionStatus::Alive,
+        Some(_) => agent_status_to_dispatch(agent),
     }
 }
 
-/// The canonical column a session status implies for a Running card, or None
-/// when the status shouldn't change the card (e.g. the session is gone).
-fn column_for_status(status: DispatchSessionStatus) -> Option<Column> {
+/// The rich status the hook-derived `@agent_status` implies for a card.
+/// An unset option (no agent / daemon down) keeps the card Running rather
+/// than disrupting a live session.
+fn agent_status_to_dispatch(status: Option<AgentStatus>) -> DispatchSessionStatus {
+    use AgentStatus::*;
     match status {
-        DispatchSessionStatus::Alive => Some(Column::Running),
-        DispatchSessionStatus::NeedsAttention => Some(Column::NeedsYou),
-        DispatchSessionStatus::Gone => None,
+        Some(Question | Permission | Error) => DispatchSessionStatus::NeedsAttention,
+        Some(Working) => DispatchSessionStatus::Alive,
+        Some(Done) => DispatchSessionStatus::Finished,
+        Some(Idle) => DispatchSessionStatus::Idle,
+        None => DispatchSessionStatus::Alive,
     }
 }
 
-/// Count Running cards whose session is alive, and the Running→NeedsYou moves
-/// implied by sessions that need the user. Only cards in `Running` are
-/// considered; a card with no status entry (no live session) is neither
-/// counted nor moved.
+/// Count Running cards whose session is alive — any status except Gone — for
+/// the per-board and global concurrency cap. A card with no status entry (no
+/// live session) is not counted.
 fn assess_running(
     cards: &[Card],
     statuses: &HashMap<String, DispatchSessionStatus>,
-) -> (usize, Vec<(CardId, Column)>) {
-    let mut running = 0;
-    let mut changes = Vec::new();
+) -> usize {
+    cards
+        .iter()
+        .filter(|c| c.column == Column::Running)
+        .filter(|c| {
+            statuses
+                .get(&c.id.0)
+                .is_some_and(|s| *s != DispatchSessionStatus::Gone)
+        })
+        .count()
+}
+
+/// Drift moves between Running and NeedsYou: a session asking the user sends
+/// its card to NeedsYou, and one working again brings it back to Running.
+fn status_moves(
+    cards: &[Card],
+    statuses: &HashMap<String, DispatchSessionStatus>,
+) -> Vec<(CardId, Column)> {
+    let mut moves = Vec::new();
     for card in cards {
-        if card.column != Column::Running {
+        let Some(status) = statuses.get(&card.id.0) else {
             continue;
-        }
-        let Some(status) = statuses.get(&card.id.0) else { continue };
-        match column_for_status(*status) {
-            Some(Column::Running) => running += 1,
-            Some(col) => changes.push((card.id.clone(), col)),
-            None => {}
+        };
+        let target = match status {
+            DispatchSessionStatus::NeedsAttention => Column::NeedsYou,
+            DispatchSessionStatus::Alive => Column::Running,
+            _ => continue,
+        };
+        if target != card.column {
+            moves.push((card.id.clone(), target));
         }
     }
-    (running, changes)
+    moves
 }
 
 /// Whether any live or archived session record for `project` already owns the
@@ -108,12 +139,19 @@ fn running_statuses(
 ) -> HashMap<String, DispatchSessionStatus> {
     let mut statuses = HashMap::new();
     for card in cards {
-        if card.column != Column::Running && card.column != Column::Review {
+        if card.column != Column::Running
+            && card.column != Column::Review
+            && card.column != Column::NeedsYou
+        {
             continue;
         }
         if let Some((tmux_name, _)) = session_record_for_card(sessions, project, &card.id) {
             let probe = tmux::probe_session(tmux_name);
-            statuses.insert(card.id.0.clone(), probe_to_status(probe.as_ref()));
+            let agent = tmux::session_agent_status(tmux_name);
+            statuses.insert(
+                card.id.0.clone(),
+                probe_to_status(probe.as_ref(), agent),
+            );
         }
     }
     statuses
@@ -192,51 +230,224 @@ fn default_prompt(card: &Card) -> String {
     }
 }
 
+/// The high-level move a finished card needs, decided purely from its status
+/// and whether its branch has commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinishedAction {
+    /// Push the branch, open/link the PR, and move to Review.
+    OpenReview,
+    /// Comment the agent's last output and move to NeedsYou.
+    NeedsYouComment,
+}
+
+/// Decide what a finished card needs. An idle agent is only finished once its
+/// branch has commits; idle without commits right after dispatch does nothing.
+fn plan_finished_action(
+    status: DispatchSessionStatus,
+    has_commits: bool,
+) -> Option<FinishedAction> {
+    match status {
+        DispatchSessionStatus::Gone | DispatchSessionStatus::Finished => {
+            Some(if has_commits {
+                FinishedAction::OpenReview
+            } else {
+                FinishedAction::NeedsYouComment
+            })
+        }
+        DispatchSessionStatus::Idle if has_commits => Some(FinishedAction::OpenReview),
+        DispatchSessionStatus::Idle => None,
+        DispatchSessionStatus::Alive | DispatchSessionStatus::NeedsAttention => None,
+    }
+}
+
 /// A PR-on-done action for a card whose session has finished.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PrAction {
     /// Link the PR the agent already opened and move the card to Review.
     Review { url: String },
+    /// Push the branch, open a PR, link it, and move to Review.
+    OpenPr,
     /// Move the card back to the user with the session's last output.
     NeedsYouComment(String),
 }
 
-/// Best-effort PR handling for finished Running/Review cards. Reacts only to
-/// PRs the agent already opened (via `gh`); it never pushes or opens a PR, to
-/// avoid network side effects. Merged→Done and archive-and-close are deferred
-/// to a later wave.
+/// A card is eligible for the finish path only while it's Running; a Review
+/// card already finished (its PR is open) and must never be re-finished, or
+/// every poll would re-link the PR.
+fn finish_eligible(card: &Card) -> bool {
+    card.column == Column::Running
+}
+
+/// Plan the finish of Running cards whose session is done, idle with commits,
+/// or gone. Only cards with a live session record are considered; a failing
+/// card must never abort the pass.
 fn plan_pr_done(
     cards: &[Card],
     statuses: &HashMap<String, DispatchSessionStatus>,
     sessions: &HashMap<String, SessionRecord>,
     project: &str,
     project_path: &str,
+    base_branches: &HashMap<String, String>,
 ) -> Vec<(CardId, PrAction)> {
     let mut out = Vec::new();
     for card in cards {
-        if card.column != Column::Running && card.column != Column::Review {
+        if !finish_eligible(card) {
             continue;
         }
-        // Only react once the session's agent has finished.
-        if statuses.get(&card.id.0) != Some(&DispatchSessionStatus::Gone) {
+        let Some(status) = statuses.get(&card.id.0).copied() else {
             continue;
-        }
+        };
         let Some((tmux_name, rec)) = session_record_for_card(sessions, project, &card.id) else {
             continue;
         };
         let branch = &rec.task_branch;
-        let has_commits = tmux::get_branch_diff(project_path, branch, "main")
+        let base = base_branches
+            .get(branch)
+            .map(String::as_str)
+            .unwrap_or("main");
+        let has_commits = tmux::get_branch_diff(project_path, branch, base)
             .is_some_and(|d| d.added + d.removed > 0);
-        if has_commits {
-            if let Some(url) = tmux::get_pr_url(project_path, branch) {
-                out.push((card.id.clone(), PrAction::Review { url }));
+        let Some(action) = plan_finished_action(status, has_commits) else {
+            continue;
+        };
+        match action {
+            FinishedAction::OpenReview => {
+                if let Some(url) = tmux::get_pr_url(project_path, branch) {
+                    out.push((card.id.clone(), PrAction::Review { url }));
+                } else {
+                    out.push((card.id.clone(), PrAction::OpenPr));
+                }
             }
-            // A PR isn't open yet: leave the card Running.
-        } else {
-            let tail = tmux::capture_output_plain(tmux_name, 40).unwrap_or_default();
-            out.push((card.id.clone(), PrAction::NeedsYouComment(tail)));
+            FinishedAction::NeedsYouComment => {
+                let tail = tmux::capture_output_plain(tmux_name, 40).unwrap_or_default();
+                out.push((card.id.clone(), PrAction::NeedsYouComment(tail)));
+            }
         }
     }
+    out
+}
+
+/// Review cards whose PR has been merged, to move to Done and close the
+/// session. A card with no session record can't be acted on and is skipped.
+fn plan_merged(
+    cards: &[Card],
+    sessions: &HashMap<String, SessionRecord>,
+    project: &str,
+    project_path: &str,
+) -> Vec<CardId> {
+    let mut out = Vec::new();
+    for card in cards {
+        if card.column != Column::Review {
+            continue;
+        }
+        let Some((_, rec)) = session_record_for_card(sessions, project, &card.id) else {
+            continue;
+        };
+        if tmux::pr_is_merged(project_path, &rec.task_branch) {
+            out.push(card.id.clone());
+        }
+    }
+    out
+}
+
+/// Archive-and-close a merged card's session via the existing snapshot path,
+/// then mark the record auto-closed so the TUI's startup restore doesn't
+/// resurrect it. The record stays, so the card is never dispatched twice.
+fn close_card_session(cfg: &Config, tmux_name: &str) {
+    let now = crate::control::now();
+    let panes = crate::inventory::list_panes();
+    let mut snap = crate::snapshot::take(
+        &panes,
+        &HashMap::new(),
+        &cfg.restore.redact,
+        now,
+    );
+    let target = crate::autoclose::Target::Session(tmux_name.to_string());
+    let _ = crate::snapshot::archive_and_close(
+        &mut snap,
+        vec![target],
+        crate::snapshot::CloseReason::AutoClose,
+        now,
+    );
+    config::set_session_auto_closed(tmux_name, true);
+}
+
+/// Push the card's branch and open a PR for it (title = card title, body =
+/// card body plus its URL). Reuses the TUI's push + `gh pr create` flow.
+fn open_pr(project_path: &str, branch: &str, card: &Card) -> Result<String> {
+    tmux::push_branch(project_path, branch)?;
+    let mut body = card.body.clone();
+    if let Some(url) = &card.url {
+        body.push_str(&format!("\n\nCard: {url}"));
+    }
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr", "create", "--fill", "--head", branch,
+            "--title", &card.title, "--body", &body,
+        ])
+        .current_dir(project_path)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "gh pr create failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Carry out one planned finish action on a card: link or open the PR, or
+/// comment the agent's last output and send the card back to the user.
+fn apply_pr_action(
+    cards: &[Card],
+    sessions: &HashMap<String, SessionRecord>,
+    project: &str,
+    project_path: &str,
+    provider: &mut dyn crate::tasks::TaskProvider,
+    id: &CardId,
+    action: &PrAction,
+) -> Result<()> {
+    match action {
+        PrAction::Review { url } => {
+            provider.link(id, Link::PullRequest, url)?;
+            provider.move_to(id, Column::Review)?;
+        }
+        PrAction::OpenPr => {
+            let Some((_, rec)) = session_record_for_card(sessions, project, id) else {
+                return Ok(());
+            };
+            let Some(card) = cards.iter().find(|c| c.id == *id) else {
+                return Ok(());
+            };
+            let url = open_pr(project_path, &rec.task_branch, card)?;
+            provider.link(id, Link::PullRequest, &url)?;
+            provider.move_to(id, Column::Review)?;
+        }
+        PrAction::NeedsYouComment(tail) => {
+            provider.comment(
+                id,
+                &format!("finished without commits; last output:\n{tail}"),
+            )?;
+            provider.move_to(id, Column::NeedsYou)?;
+        }
+    }
+    Ok(())
+}
+
+/// Human-readable descriptions of every planned action, for dry-run reports.
+fn plan_descriptions(
+    moves: &[(CardId, Column)],
+    pr_actions: &[(CardId, PrAction)],
+    merged: &[CardId],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    out.extend(moves.iter().map(|(id, col)| format!("move {} -> {col:?}", id.0)));
+    out.extend(pr_actions.iter().map(|(id, a)| match a {
+        PrAction::Review { .. } => format!("link PR {} -> review", id.0),
+        PrAction::OpenPr => format!("push + open PR {} -> review", id.0),
+        PrAction::NeedsYouComment(_) => format!("comment {} -> needs you", id.0),
+    }));
+    out.extend(merged.iter().map(|id| format!("PR merged {} -> done", id.0)));
     out
 }
 
@@ -256,6 +467,8 @@ pub struct BoardSummary {
     pub dispatched: Vec<String>,
     pub running: usize,
     pub ready: usize,
+    /// Actions a dry-run pass *would* take, human-readable.
+    pub planned: Vec<String>,
 }
 
 /// Run one dispatch pass against an in-memory config and session map. When
@@ -282,36 +495,67 @@ pub fn dispatch_cfg(
             let provider = provider_for(cfg, board)?;
             provider.list()?
         };
-        let project_path = ops::find_project(&*cfg, &board.project)?.path.clone();
+        let project = ops::find_project(&*cfg, &board.project)?;
+        let project_path = project.path.clone();
+        // Base branch per task branch, so a PR/diff compares against the
+        // task's own base rather than hardcoding "main".
+        let base_branches: HashMap<String, String> = project
+            .tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.branch.clone(),
+                    t.base_branch.clone().unwrap_or_else(|| "main".to_string()),
+                )
+            })
+            .collect();
         let statuses = running_statuses(&cards, sessions, &board.project);
-        let (running, needs_you) = assess_running(&cards, &statuses);
+        let running = assess_running(&cards, &statuses);
         global_running += running;
 
-        // Status mapping: move Running cards whose session needs the user.
-        if !dry_run && !needs_you.is_empty() {
+        // Status drift: NeedsYou <-> Running as the agent asks / works again.
+        let moves = status_moves(&cards, &statuses);
+        // Finish: done / idle-with-commits / gone cards open (or link) a PR.
+        let pr_actions =
+            plan_pr_done(&cards, &statuses, sessions, &board.project, &project_path, &base_branches);
+        // Merged PRs close the card's session and move it to Done.
+        let merged = plan_merged(&cards, sessions, &board.project, &project_path);
+        let planned = plan_descriptions(&moves, &pr_actions, &merged);
+
+        if !dry_run {
             let mut provider = provider_for(cfg, board)?;
-            for (id, col) in &needs_you {
-                provider.move_to(id, *col)?;
+            for (id, col) in &moves {
+                // One card failing must not abort the pass: log it and move on.
+                if let Err(e) = provider.move_to(id, *col) {
+                    eprintln!("dispatcher: card {}: {e:#}", id.0);
+                }
+            }
+            for (id, action) in &pr_actions {
+                if let Err(e) = apply_pr_action(
+                    &cards,
+                    sessions,
+                    &board.project,
+                    &project_path,
+                    provider.as_mut(),
+                    id,
+                    action,
+                ) {
+                    eprintln!("dispatcher: card {}: {e:#}", id.0);
+                }
+            }
+            for id in &merged {
+                if let Err(e) = provider.move_to(id, Column::Done) {
+                    eprintln!("dispatcher: card {}: move to done: {e:#}", id.0);
+                }
             }
         }
-
-        // PR-on-done for finished sessions (best-effort, no push/open).
-        let pr_actions = plan_pr_done(&cards, &statuses, sessions, &board.project, &project_path);
-        if !dry_run && !pr_actions.is_empty() {
-            let mut provider = provider_for(cfg, board)?;
-            for (id, action) in &pr_actions {
-                match action {
-                    PrAction::Review { url } => {
-                        provider.link(id, Link::PullRequest, url)?;
-                        provider.move_to(id, Column::Review)?;
-                    }
-                    PrAction::NeedsYouComment(tail) => {
-                        provider.comment(
-                            id,
-                            &format!("finished without commits; last output:\n{tail}"),
-                        )?;
-                        provider.move_to(id, Column::NeedsYou)?;
-                    }
+        // Archive-and-close merged sessions once the provider is dropped.
+        if !dry_run && !merged.is_empty() {
+            for id in &merged {
+                if let Some((tmux_name, _)) =
+                    session_record_for_card(sessions, &board.project, id)
+                {
+                    close_card_session(cfg, tmux_name);
                 }
             }
         }
@@ -332,6 +576,7 @@ pub fn dispatch_cfg(
             dispatched: vec![],
             running,
             ready: ready.len(),
+            planned,
         };
         let mut running = running;
         for card in ready {
@@ -482,7 +727,7 @@ pub fn board_status(
             provider.list()?
         };
         let statuses = running_statuses(&cards, sessions, &board.project);
-        let (running, _) = assess_running(&cards, &statuses);
+        let running = assess_running(&cards, &statuses);
         out.push(BoardStatus {
             name: board.name.clone(),
             running,
@@ -599,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn assess_running_counts_alive_and_moves_needs_attention() {
+    fn assess_running_counts_alive_sessions_only() {
         let cards = vec![
             card("a", Column::Running, None),
             card("b", Column::Running, None),
@@ -608,31 +853,160 @@ mod tests {
         let mut statuses = HashMap::new();
         statuses.insert("a".to_string(), DispatchSessionStatus::Alive);
         statuses.insert("b".to_string(), DispatchSessionStatus::NeedsAttention);
-        let (running, changes) = assess_running(&cards, &statuses);
-        assert_eq!(running, 1);
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].0, CardId("b".to_string()));
-        assert_eq!(changes[0].1, Column::NeedsYou);
+        // Any status except Gone counts toward the cap.
+        assert_eq!(assess_running(&cards, &statuses), 2);
+        // A card with no status entry (no live session) isn't counted.
+        assert_eq!(assess_running(&cards[..1], &HashMap::new()), 0);
     }
 
     #[test]
-    fn gone_session_neither_counts_nor_moves() {
+    fn gone_session_does_not_count() {
         let cards = vec![card("a", Column::Running, None)];
         let mut statuses = HashMap::new();
         statuses.insert("a".to_string(), DispatchSessionStatus::Gone);
-        let (running, changes) = assess_running(&cards, &statuses);
-        assert_eq!(running, 0);
-        assert!(changes.is_empty());
+        assert_eq!(assess_running(&cards, &statuses), 0);
     }
 
     #[test]
-    fn probe_status_mapping() {
-        assert_eq!(column_for_status(DispatchSessionStatus::Alive), Some(Column::Running));
+    fn status_moves_needs_you_and_back_to_running() {
+        let cards = vec![
+            card("ask", Column::Running, None),
+            card("back", Column::NeedsYou, None),
+            card("idle", Column::Running, None),
+        ];
+        let mut statuses = HashMap::new();
+        statuses.insert("ask".to_string(), DispatchSessionStatus::NeedsAttention);
+        statuses.insert("back".to_string(), DispatchSessionStatus::Alive);
+        statuses.insert("idle".to_string(), DispatchSessionStatus::Idle);
+        let moves = status_moves(&cards, &statuses);
+        // Asking card goes to NeedsYou; working card returns to Running; an
+        // idle card isn't drifted.
+        assert_eq!(moves.len(), 2);
+        assert!(moves.contains(&(CardId("ask".to_string()), Column::NeedsYou)));
+        assert!(moves.contains(&(CardId("back".to_string()), Column::Running)));
+    }
+
+    #[test]
+    fn finished_action_maps_status_and_commits() {
+        use DispatchSessionStatus::*;
+        // Done with commits -> review; done without commits -> needs you.
         assert_eq!(
-            column_for_status(DispatchSessionStatus::NeedsAttention),
-            Some(Column::NeedsYou)
+            plan_finished_action(Finished, true),
+            Some(FinishedAction::OpenReview)
         );
-        assert_eq!(column_for_status(DispatchSessionStatus::Gone), None);
+        assert_eq!(
+            plan_finished_action(Finished, false),
+            Some(FinishedAction::NeedsYouComment)
+        );
+        // Gone follows the same rule.
+        assert_eq!(
+            plan_finished_action(Gone, true),
+            Some(FinishedAction::OpenReview)
+        );
+        assert_eq!(
+            plan_finished_action(Gone, false),
+            Some(FinishedAction::NeedsYouComment)
+        );
+        // Idle only finishes once its branch has commits.
+        assert_eq!(
+            plan_finished_action(Idle, true),
+            Some(FinishedAction::OpenReview)
+        );
+        assert_eq!(plan_finished_action(Idle, false), None);
+        // Working / asking never finish here.
+        assert_eq!(plan_finished_action(Alive, true), None);
+        assert_eq!(plan_finished_action(NeedsAttention, true), None);
+    }
+
+    #[test]
+    fn agent_status_to_dispatch_mapping() {
+        use AgentStatus::*;
+        assert_eq!(
+            agent_status_to_dispatch(Some(Question)),
+            DispatchSessionStatus::NeedsAttention
+        );
+        assert_eq!(
+            agent_status_to_dispatch(Some(Permission)),
+            DispatchSessionStatus::NeedsAttention
+        );
+        assert_eq!(
+            agent_status_to_dispatch(Some(Error)),
+            DispatchSessionStatus::NeedsAttention
+        );
+        assert_eq!(
+            agent_status_to_dispatch(Some(Working)),
+            DispatchSessionStatus::Alive
+        );
+        assert_eq!(
+            agent_status_to_dispatch(Some(Done)),
+            DispatchSessionStatus::Finished
+        );
+        assert_eq!(
+            agent_status_to_dispatch(Some(Idle)),
+            DispatchSessionStatus::Idle
+        );
+        // Unset status keeps a live session Running, never disrupting it.
+        assert_eq!(
+            agent_status_to_dispatch(None),
+            DispatchSessionStatus::Alive
+        );
+    }
+
+    #[test]
+    fn probe_to_status_combines_probe_and_agent() {
+        let probe = tmux::SessionProbe {
+            agent_alive: true,
+            content_hash: 0,
+            has_permission_prompt: false,
+        };
+        assert_eq!(
+            probe_to_status(Some(&probe), Some(AgentStatus::Working)),
+            DispatchSessionStatus::Alive
+        );
+        // A permission dialog wins even if the hook status is stale.
+        let dialog = tmux::SessionProbe {
+            agent_alive: true,
+            content_hash: 0,
+            has_permission_prompt: true,
+        };
+        assert_eq!(
+            probe_to_status(Some(&dialog), Some(AgentStatus::Working)),
+            DispatchSessionStatus::NeedsAttention
+        );
+        // A dead or missing session is gone.
+        assert_eq!(
+            probe_to_status(None, Some(AgentStatus::Working)),
+            DispatchSessionStatus::Gone
+        );
+        let dead = tmux::SessionProbe {
+            agent_alive: false,
+            content_hash: 0,
+            has_permission_prompt: false,
+        };
+        assert_eq!(
+            probe_to_status(Some(&dead), Some(AgentStatus::Done)),
+            DispatchSessionStatus::Gone
+        );
+    }
+
+    #[test]
+    fn review_cards_are_never_re_finished() {
+        let cards = vec![card("r", Column::Review, None)];
+        let mut statuses = HashMap::new();
+        statuses.insert("r".to_string(), DispatchSessionStatus::Finished);
+        let mut sessions = HashMap::new();
+        sessions.insert("s1".to_string(), session("proj", Some("r")));
+        let actions = plan_pr_done(
+            &cards,
+            &statuses,
+            &sessions,
+            "proj",
+            "/tmp/p",
+            &HashMap::new(),
+        );
+        // A Review card is already finished; re-running the finish path would
+        // spam a new PR link every poll.
+        assert!(actions.is_empty());
     }
 
     #[test]

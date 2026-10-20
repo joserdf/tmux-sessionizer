@@ -98,6 +98,20 @@ impl AgentStatus {
             AgentStatus::Permission => "permission",
         }
     }
+
+    /// Parse a `@agent_status` window-option value back into a status.
+    /// Unknown or empty codes (no agent, or the daemon isn't running) are None.
+    pub fn from_code(code: &str) -> Option<AgentStatus> {
+        match code {
+            "idle" => Some(AgentStatus::Idle),
+            "working" => Some(AgentStatus::Working),
+            "done" => Some(AgentStatus::Done),
+            "error" => Some(AgentStatus::Error),
+            "question" => Some(AgentStatus::Question),
+            "permission" => Some(AgentStatus::Permission),
+            _ => None,
+        }
+    }
 }
 
 /// Seconds a finished pane must be on screen before its result counts as read.

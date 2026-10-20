@@ -2491,6 +2491,23 @@ pub fn probe_session(session_name: &str) -> Option<SessionProbe> {
     })
 }
 
+/// The daemon-published hook-derived agent status for a session's window 0,
+/// read from its `@agent_status` window option. `None` when the session can't
+/// be queried (gone) or the option isn't set (no agent / daemon down).
+pub fn session_agent_status(session_name: &str) -> Option<crate::inventory::AgentStatus> {
+    let target = format!("{session_name}:0");
+    let output = Command::new("tmux")
+        .args(["show-options", "-wqv", "-t", &target, "@agent_status"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    crate::inventory::AgentStatus::from_code(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    )
+}
+
 /// Whether the pane shows an active dialog needing the user (permission
 /// prompt or question selector).
 ///
@@ -2551,6 +2568,23 @@ pub fn get_pr_url(project_path: &str, branch: &str) -> Option<String> {
 
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if url.is_empty() { None } else { Some(url) }
+}
+
+/// Whether the PR for `branch` (in `project_path`) is merged. False when there
+/// is no PR or `gh` can't be queried, so a caller never acts on an unknown PR.
+pub fn pr_is_merged(project_path: &str, branch: &str) -> bool {
+    let output = Command::new("gh")
+        .args(["pr", "view", branch, "--json", "state", "-q", ".state"])
+        .current_dir(project_path)
+        .output()
+        .ok();
+    output
+        .and_then(|o| {
+            o.status
+                .success()
+                .then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+        })
+        .is_some_and(|s| s.trim() == "MERGED")
 }
 
 pub fn next_session_number(project_name: &str, task_name: &str, sessions: &[TmuxSession]) -> u32 {
