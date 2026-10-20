@@ -943,6 +943,20 @@ pub fn count_terminal_windows(session_name: &str) -> usize {
     }
 }
 
+/// The pid of the tmux server (`#{pid}`). Pane ids are only unique within one
+/// server lifetime and are reused after a restart, so this distinguishes a new
+/// server. `None` when no server is running or tmux is missing.
+pub fn server_pid() -> Option<u32> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "#{pid}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 /// All tmux session names on the current server (not only showrunner-managed
 /// `cm__*` sessions), used for per-session resource monitoring.
 pub fn list_all_tmux_sessions() -> Vec<String> {

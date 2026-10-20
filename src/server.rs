@@ -624,13 +624,24 @@ async fn api_queue_push(
     if body.text.is_empty() {
         return Err(bad_request("text is required"));
     }
-    let position = state.worker.queue.lock().unwrap().push(
-        &body.pane,
-        crate::worker::QueuedMsg {
-            text: body.text,
-            submit: body.submit,
-        },
-    );
+    let position = {
+        let mut q = state.worker.queue.lock().unwrap();
+        // Record the tmux server pid on first push so a queue persisted before
+        // any tmux server existed still survives the next restart.
+        q.ensure_server_pid(crate::tmux::server_pid());
+        let position = q.push(
+            &body.pane,
+            // Always start fresh: the caller never controls retry attempts.
+            crate::worker::QueuedMsg {
+                text: body.text,
+                submit: body.submit,
+                attempts: 0,
+            },
+        );
+        // Persist so the queue survives a daemon restart.
+        let _ = q.to_file(&crate::worker::queue_path());
+        position
+    };
     Ok(axum::Json(json!({ "queued": true, "position": position })))
 }
 

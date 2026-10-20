@@ -186,7 +186,8 @@ where is known.
 The caller's own pane is protected: `send_message`, `send_keys`, `close` and
 `suspend` refuse it. `send_message` to a working agent is queued (delivered
 when the agent next becomes idle or done) unless `force` pastes immediately,
-and `close` needs `confirm: true`. Set `[mcp] read_only = true` in
+and `close` needs `confirm: true`. Queued messages survive daemon restarts
+(but not tmux server restarts). Set `[mcp] read_only = true` in
 `~/.showrunner/config.toml` to allow only the reading tools.
 
 ## Configuration

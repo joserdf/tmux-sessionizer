@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -32,6 +33,22 @@ pub struct WorkerHints {
 pub struct QueuedMsg {
     pub text: String,
     pub submit: bool,
+    /// Times pasting this message has failed; a message is dropped after 3.
+    /// Always starts at 0; the API never accepts a value for it.
+    #[serde(default)]
+    pub attempts: u32,
+}
+
+/// The on-disk shape of the message queue (see [`MessageQueue::to_file`]).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct QueueFile {
+    /// tmux server pid the queued pane ids refer to. Pane ids are only unique
+    /// within one tmux server lifetime and are reused after a restart, so a
+    /// queue recorded against a different (or unknown) server is discarded.
+    #[serde(default)]
+    server_pid: Option<u32>,
+    #[serde(default)]
+    queues: HashMap<String, VecDeque<QueuedMsg>>,
 }
 
 /// FIFO of pending messages per pane, keyed by pane id. Owned by the daemon's
@@ -39,6 +56,10 @@ pub struct QueuedMsg {
 #[derive(Debug, Default)]
 pub struct MessageQueue {
     queues: HashMap<String, VecDeque<QueuedMsg>>,
+    /// tmux server pid the pane ids refer to, persisted alongside the queue so
+    /// a daemon restart can tell a tmux server restart (which reuses pane ids)
+    /// apart. `None` when no server was running at load time.
+    server_pid: Option<u32>,
 }
 
 impl MessageQueue {
@@ -49,6 +70,25 @@ impl MessageQueue {
         queue.len()
     }
 
+    /// Put a message back at the FRONT of a pane's queue (a failed paste retry).
+    pub fn requeue_front(&mut self, pane: &str, msg: QueuedMsg) {
+        self.queues
+            .entry(pane.to_string())
+            .or_default()
+            .push_front(msg);
+    }
+
+    /// Record the current tmux server pid if none is set yet — the daemon may
+    /// have started before any tmux server existed, in which case the queue
+    /// would otherwise be persisted with an unknown server and discarded on the
+    /// next restart. A server pid already set is kept. Returns the pid in effect.
+    pub fn ensure_server_pid(&mut self, pid: Option<u32>) -> Option<u32> {
+        if self.server_pid.is_none() {
+            self.server_pid = pid;
+        }
+        self.server_pid
+    }
+
     /// Every queued message per pane, oldest first, for `GET /api/v2/queue`.
     pub fn pending(&self) -> HashMap<String, Vec<QueuedMsg>> {
         self.queues
@@ -56,18 +96,71 @@ impl MessageQueue {
             .map(|(p, q)| (p.clone(), q.iter().cloned().collect()))
             .collect()
     }
+
+    /// Load the persisted queue, but only when it was recorded against
+    /// `server_pid` (tmux pane ids are only unique within one server lifetime,
+    /// so a queue from another or unknown server must not be trusted). Returns
+    /// an empty queue when there is no file, it fails to parse, or the recorded
+    /// server differs.
+    pub fn from_file(path: &Path, server_pid: Option<u32>) -> MessageQueue {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return MessageQueue::default();
+        };
+        let Ok(file) = serde_json::from_str::<QueueFile>(&text) else {
+            return MessageQueue::default();
+        };
+        if !queue_matches_server(file.server_pid, server_pid) {
+            return MessageQueue::default();
+        }
+        MessageQueue {
+            queues: file.queues,
+            server_pid,
+        }
+    }
+
+    /// Write the queue to `path` atomically (tmp file + rename).
+    pub fn to_file(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = QueueFile {
+            server_pid: self.server_pid,
+            queues: self.queues.clone(),
+        };
+        let text = serde_json::to_vec(&file).map_err(std::io::Error::other)?;
+        let tmp = path.with_file_name(format!("queue.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, path)
+    }
+}
+
+/// Path of the persisted message queue in the showrunner data dir.
+pub fn queue_path() -> PathBuf {
+    crate::config::base_dir().join("queue.json")
+}
+
+/// True when a persisted queue is safe to load: it records a tmux server pid
+/// that matches the current one. A missing server on either side means the
+/// pane ids can't be trusted, so the queue is discarded.
+fn queue_matches_server(persisted: Option<u32>, current: Option<u32>) -> bool {
+    match (persisted, current) {
+        (Some(p), Some(c)) => p == c,
+        _ => false,
+    }
 }
 
 /// Pop ONE message per pane that is `idle` or `done` (never `question`,
 /// `permission` or `error` — the text would answer a prompt), and drop queues
 /// for panes that no longer exist. Returns one `(pane, message)` per eligible
-/// pane.
+/// pane and whether any vanished pane's queue was pruned.
 fn take_deliverable(
     queue: &mut MessageQueue,
     panes: &HashSet<String>,
     statuses: &HashMap<String, AgentStatus>,
-) -> Vec<(String, QueuedMsg)> {
+) -> (Vec<(String, QueuedMsg)>, bool) {
+    let before = queue.queues.len();
     queue.queues.retain(|pane, _| panes.contains(pane));
+    let pruned = queue.queues.len() != before;
     let mut deliver = Vec::new();
     for (pane, q) in queue.queues.iter_mut() {
         if matches!(
@@ -78,7 +171,20 @@ fn take_deliverable(
             deliver.push((pane.clone(), msg));
         }
     }
-    deliver
+    (deliver, pruned)
+}
+
+/// A message whose paste failed: re-queue it at the front of its pane's queue
+/// with `attempts + 1`, or return `true` (drop it) once it has failed 3 times.
+fn requeue_failed(queue: &mut MessageQueue, pane: &str, msg: QueuedMsg) -> bool {
+    if msg.attempts >= 2 {
+        true
+    } else {
+        let mut msg = msg;
+        msg.attempts += 1;
+        queue.requeue_front(pane, msg);
+        false
+    }
 }
 
 /// Data produced by the background worker for the UI to consume.
@@ -150,7 +256,12 @@ impl Worker {
         }));
         let latest = Arc::new(Mutex::new(None));
         let hook_inbox = Arc::new(Mutex::new(VecDeque::new()));
-        let queue = Arc::new(Mutex::new(MessageQueue::default()));
+        // The local worker owns the queue, so it loads what a previous daemon
+        // persisted (and only if it was recorded against the same tmux server).
+        let queue = Arc::new(Mutex::new(MessageQueue::from_file(
+            &queue_path(),
+            crate::tmux::server_pid(),
+        )));
         // Local mode: the worker is its own source, so it's always "connected"
         // and never remote (no daemon banner).
         let connected = Arc::new(AtomicBool::new(true));
@@ -611,7 +722,7 @@ fn worker_loop(
         // waits for the next idle. The daemon owns the queue; a fallback prober
         // must not deliver.
         if !fallback {
-            let deliver = {
+            let (deliver, pruned) = {
                 let mut q = queue.lock().unwrap();
                 let alive: HashSet<String> = panes.iter().map(|p| p.id.clone()).collect();
                 let statuses: HashMap<String, AgentStatus> = pane_states
@@ -620,8 +731,25 @@ fn worker_loop(
                     .collect();
                 take_deliverable(&mut q, &alive, &statuses)
             };
+            // Persist when anything changed (delivered, pruned, re-queued or
+            // dropped), so the queue survives a daemon restart.
+            let mut changed = pruned || !deliver.is_empty();
             for (pane, msg) in deliver {
-                let _ = tmux::paste_text(&pane, &msg.text, msg.submit);
+                if let Err(e) = tmux::paste_text(&pane, &msg.text, msg.submit) {
+                    let attempts = msg.attempts + 1;
+                    let mut q = queue.lock().unwrap();
+                    if requeue_failed(&mut q, &pane, msg) {
+                        eprintln!(
+                            "showrunner: dropped queued message for {pane} after {attempts} \
+                             attempts: {e:#}"
+                        );
+                    }
+                    changed = true;
+                }
+            }
+            if changed {
+                let q = queue.lock().unwrap();
+                let _ = q.to_file(&queue_path());
             }
         }
         inventory::apply_window_options(&mut published_windows, &panes, &pane_states, now);
@@ -1035,7 +1163,19 @@ mod message_queue_tests {
         QueuedMsg {
             text: text.to_string(),
             submit: true,
+            attempts: 0,
         }
+    }
+
+    /// A unique path under the OS temp dir for a test's queue file.
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "showrunner_queue_test_{}_{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
     }
 
     #[test]
@@ -1059,7 +1199,8 @@ mod message_queue_tests {
             ("%2".to_string(), AgentStatus::Idle),
             ("%3".to_string(), AgentStatus::Idle),
         ]);
-        let deliver = take_deliverable(&mut q, &panes, &statuses);
+        let (deliver, pruned) = take_deliverable(&mut q, &panes, &statuses);
+        assert!(!pruned);
         // One per pane, FIFO order within a pane.
         let mut by_pane: HashMap<String, Vec<String>> = HashMap::new();
         for (pane, m) in &deliver {
@@ -1092,7 +1233,9 @@ mod message_queue_tests {
             ("%3".to_string(), AgentStatus::Error),
             ("%4".to_string(), AgentStatus::Working),
         ]);
-        assert!(take_deliverable(&mut q, &panes, &statuses).is_empty());
+        let (deliver, pruned) = take_deliverable(&mut q, &panes, &statuses);
+        assert!(deliver.is_empty());
+        assert!(!pruned);
         assert_eq!(q.pending().len(), 4);
     }
 
@@ -1105,12 +1248,96 @@ mod message_queue_tests {
         // %2 still exists but is idle; %3 is new with no queue.
         let panes: HashSet<String> = ["%2", "%3"].into_iter().map(String::from).collect();
         let statuses = HashMap::from([("%2".to_string(), AgentStatus::Idle)]);
-        let deliver = take_deliverable(&mut q, &panes, &statuses);
+        let (deliver, pruned) = take_deliverable(&mut q, &panes, &statuses);
+        assert!(pruned);
         assert_eq!(deliver.len(), 1);
         assert_eq!(deliver[0].0, "%2");
         // %1's queue was dropped (pane vanished), %2 has one message left.
         assert_eq!(q.pending().len(), 1);
         assert_eq!(q.pending()["%2"].len(), 1);
         assert_eq!(q.pending()["%2"][0].text, "c");
+    }
+
+    #[test]
+    fn requeue_failed_increments_attempts_and_reaches_front() {
+        let mut q = MessageQueue::default();
+        q.push("%1", msg("first"));
+        // A later failure on a second message: it must be retried before "first"
+        // once the pane is idle again.
+        let mut failed = msg("retry");
+        failed.attempts = 1;
+        assert!(!requeue_failed(&mut q, "%1", failed));
+        let (deliver, _) = take_deliverable(
+            &mut q,
+            &["%1".to_string()].into_iter().collect(),
+            &HashMap::from([("%1".to_string(), AgentStatus::Idle)]),
+        );
+        assert_eq!(deliver.len(), 1);
+        assert_eq!(deliver[0].1.text, "retry");
+        assert_eq!(deliver[0].1.attempts, 2);
+    }
+
+    #[test]
+    fn requeue_failed_drops_after_three_attempts() {
+        let mut q = MessageQueue::default();
+        let mut msg = msg("stubborn");
+        msg.attempts = 2;
+        // attempts = 2 is the 3rd failure, so it is dropped, not re-queued.
+        assert!(requeue_failed(&mut q, "%1", msg));
+        assert_eq!(q.pending().len(), 0);
+    }
+
+    #[test]
+    fn ensure_server_pid_fills_in_unknown_server_once() {
+        let mut q = MessageQueue::default();
+        assert_eq!(q.ensure_server_pid(None), None);
+        // A server now exists: it is recorded on the first push.
+        assert_eq!(q.ensure_server_pid(Some(9)), Some(9));
+        // Once set, a later (changed) server pid is ignored.
+        assert_eq!(q.ensure_server_pid(Some(10)), Some(9));
+    }
+
+    #[test]
+    fn queue_matches_server_only_for_equal_pids() {
+        assert!(queue_matches_server(Some(42), Some(42)));
+        assert!(!queue_matches_server(Some(41), Some(42)));
+        assert!(!queue_matches_server(None, Some(42)));
+        assert!(!queue_matches_server(Some(42), None));
+        assert!(!queue_matches_server(None, None));
+    }
+
+    #[test]
+    fn to_file_and_from_file_round_trip() {
+        let path = temp_path("roundtrip");
+        let mut q = MessageQueue {
+            server_pid: Some(7),
+            ..MessageQueue::default()
+        };
+        q.push("%1", msg("a"));
+        q.push("%1", msg("b"));
+        q.to_file(&path).unwrap();
+
+        let loaded = MessageQueue::from_file(&path, Some(7));
+        assert_eq!(loaded.server_pid, Some(7));
+        assert_eq!(loaded.pending()["%1"].len(), 2);
+        assert_eq!(loaded.pending()["%1"][0].text, "a");
+    }
+
+    #[test]
+    fn from_file_discards_unknown_or_different_server() {
+        let path = temp_path("discard");
+        let mut q = MessageQueue {
+            server_pid: Some(7),
+            ..MessageQueue::default()
+        };
+        q.push("%1", msg("a"));
+        q.to_file(&path).unwrap();
+
+        // Same server survives a daemon restart.
+        assert_eq!(MessageQueue::from_file(&path, Some(7)).pending()["%1"].len(), 1);
+        // A different server (tmux restarted, pane ids reused) is discarded.
+        assert_eq!(MessageQueue::from_file(&path, Some(8)).pending().len(), 0);
+        // Unknown current server is discarded.
+        assert_eq!(MessageQueue::from_file(&path, None).pending().len(), 0);
     }
 }
