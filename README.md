@@ -198,6 +198,30 @@ and `close` needs `confirm: true`. Queued messages survive daemon restarts
 (but not tmux server restarts). Set `[mcp] read_only = true` in
 `~/.showrunner/config.toml` to allow only the reading tools.
 
+### Streamable HTTP (on the daemon)
+
+The daemon (`showrunner serve`) also exposes the same MCP server over streamable
+HTTP at `http://127.0.0.1:7878/mcp`, so a local program (e.g. a Telegram
+assistant) can poll statuses and call `approve` / `answer` over HTTP instead of
+spawning stdio. It is protected by a bearer token:
+
+- The token lives in `~/.showrunner/mcp_token` (32 random bytes, hex-encoded,
+  permissions `0600`). It is created on daemon start if absent.
+- `showrunner mcp token` prints that file's path (never the token itself);
+  `showrunner mcp token --rotate` regenerates it.
+- Every request must carry `Authorization: Bearer <token>`; a missing or wrong
+  token gets a `401`. The token is compared in constant time and never logged.
+
+Point an HTTP MCP client at the endpoint and send the header, e.g.:
+
+```sh
+curl http://127.0.0.1:7878/mcp \
+  -H "Authorization: Bearer $(cat ~/.showrunner/mcp_token)" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+```
+
 ## Configuration
 
 - State: `~/.showrunner/` (projects, tasks, session records, worktrees)

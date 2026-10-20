@@ -337,7 +337,7 @@ fn cards_json(
 }
 
 impl Server {
-    fn new(read_only: bool) -> Self {
+    pub(crate) fn new(read_only: bool) -> Self {
         Self {
             read_only,
             tool_router: Self::tool_router(),

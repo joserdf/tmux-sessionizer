@@ -63,6 +63,10 @@ Restore (snapshot in ~/.showrunner/snapshot.json, taken by the daemon):
 MCP server (lets a coding agent list, read, message and manage sessions):
   showrunner mcp                                serve on stdio, e.g.
                                                 `claude mcp add showrunner -- showrunner mcp`
+                                                (the daemon also serves it over
+                                                streamable HTTP at /mcp)
+  showrunner mcp token [--rotate]               print the /mcp bearer-token file
+                                                path (--rotate regenerates it)
 
 Task boards (native provider; Plane/GitHub/Jira later):
   showrunner board                            TUI kanban board view
@@ -95,7 +99,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("restore") => Some(cmd_restore(rest)),
         Some("closed") => Some(cmd_closed(rest)),
         Some("reopen") => Some(cmd_reopen(rest)),
-        Some("mcp") => Some(crate::mcp::run()),
+        Some("mcp") => Some(cmd_mcp(rest)),
         Some("sessions") => Some(crate::sessions_view::run()),
         Some("--help" | "-h" | "help") => {
             print!("{HELP}");
@@ -163,6 +167,29 @@ fn cmd_serve(args: &[String]) -> Result<()> {
         .unwrap_or_else(|| "127.0.0.1:7878".to_string());
     crate::restore::boot(&Config::load().map(|c| c.restore).unwrap_or_default());
     server::run(&bind)
+}
+
+fn cmd_mcp(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        None => crate::mcp::run(),
+        Some("token") => cmd_mcp_token(&args[1..]),
+        Some(other) => bail!(
+            "unknown mcp command '{other}' (expected nothing, to serve on stdio, or 'token')"
+        ),
+    }
+}
+
+/// Print the bearer-token file's path (never the token itself); `--rotate`
+/// regenerates it first.
+fn cmd_mcp_token(args: &[String]) -> Result<()> {
+    let (_, flags) = parse_args(args, &[], &["rotate"])?;
+    if flags.contains_key("rotate") {
+        crate::mcp_token::rotate()?;
+    } else {
+        crate::mcp_token::load_or_create()?;
+    }
+    println!("{}", crate::mcp_token::token_path().display());
+    Ok(())
 }
 
 fn print_report(r: &crate::restore::Report) {

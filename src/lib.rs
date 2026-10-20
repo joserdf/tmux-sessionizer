@@ -12,6 +12,7 @@ pub mod hooks;
 pub mod hooks_install;
 pub mod inventory;
 pub mod mcp;
+pub mod mcp_token;
 pub mod naming;
 pub mod notify;
 pub mod ops;

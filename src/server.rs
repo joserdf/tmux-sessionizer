@@ -5,17 +5,24 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::Router;
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::body::Body;
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
+use axum::middleware;
 use axum::response::{Html, IntoResponse, Response};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use futures_core::stream::Stream;
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpServerConfig, StreamableHttpService,
+    session::local::LocalSessionManager,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::time::interval;
 
 use crate::config::{self, Config};
+use crate::mcp_token;
 use crate::ops;
 use crate::tmux::{self, DiffStats, TmuxSession};
 use crate::worker::{TaskInfo, Worker, WorkerUpdate};
@@ -29,6 +36,9 @@ struct ServerState {
     /// Recent agent hook events (session id, normalized event, time), ingested
     /// via POST /api/hook. Bounded to the most recent ~200.
     hook_events: Mutex<VecDeque<(String, crate::hooks::AgentEvent, std::time::Instant)>>,
+    /// Bearer token guarding the MCP streamable-HTTP endpoint (`/mcp`). Loaded
+    /// at startup; never logged or echoed.
+    mcp_token: String,
 }
 
 type ApiError = (StatusCode, String);
@@ -47,6 +57,9 @@ pub fn run(bind: &str) -> Result<()> {
         hostname: crate::app::detect_hostname(),
         last_state: Mutex::new(None),
         hook_events: Mutex::new(VecDeque::new()),
+        // Fail closed: if the token can't be read or created, every /mcp
+        // request is rejected with 401.
+        mcp_token: mcp_token::load_or_create().unwrap_or_default(),
     });
 
     if let Ok(cfg) = Config::load() {
@@ -55,6 +68,21 @@ pub fn run(bind: &str) -> Result<()> {
 
     // Capture a handle for the status-cache task before `state` moves into the router.
     let status_state = state.clone();
+
+    // MCP over streamable HTTP, bearer-protected. One `Server` is created per
+    // session, honoring [mcp] read_only exactly like `showrunner mcp` on stdio.
+    let read_only = Config::load()
+        .map(|c| c.mcp.read_only)
+        .unwrap_or(false);
+    let mcp_service: StreamableHttpService<crate::mcp::Server, LocalSessionManager> =
+        StreamableHttpService::new(
+            move || Ok(crate::mcp::Server::new(read_only)),
+            Default::default(),
+            StreamableHttpServerConfig::default(),
+        );
+    let mcp_router = Router::new()
+        .nest_service("/mcp", mcp_service)
+        .layer(middleware::from_fn_with_state(state.clone(), require_bearer));
 
     let app = Router::new()
         .route("/", get(index))
@@ -87,6 +115,7 @@ pub fn run(bind: &str) -> Result<()> {
         .route("/board", get(board_page))
         .route("/board.js", get(board_js))
         .route("/board.css", get(board_css))
+        .merge(mcp_router)
         .with_state(state);
 
     // Task-board dispatcher loop: polls every `[dispatch] poll_secs` (default 60),
@@ -138,6 +167,27 @@ pub fn run(bind: &str) -> Result<()> {
         .await?;
         Ok(())
     })
+}
+
+/// Require `Authorization: Bearer <token>` on every `/mcp` request. The token
+/// is compared in constant time; the presented token is never logged. Missing
+/// or wrong tokens get a bare 401 with no details.
+async fn require_bearer(
+    State(state): State<Arc<ServerState>>,
+    req: Request,
+    next: middleware::Next,
+) -> Response {
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    if !mcp_token::verify(presented, &state.mcp_token) {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::from("unauthorized"))
+            .expect("valid response");
+    }
+    next.run(req).await
 }
 
 /// Write the attention count to the tmux status-bar cache file (best effort).

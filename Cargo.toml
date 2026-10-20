@@ -26,7 +26,7 @@ async-stream = "0.3"
 # HTTP client for the TUI to consume the daemon's SSE stream and the Plane
 # task provider (blocking, JSON, TLS for the HTTPS self-hosted instances).
 reqwest = { version = "0.12", default-features = false, features = ["stream", "blocking", "json", "rustls-tls"] }
-rmcp = { version = "3.5.1", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.5.1", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
 schemars = "1"
 
 # The profile that 'dist' will build with
