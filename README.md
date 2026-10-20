@@ -192,6 +192,30 @@ The caller's own pane is protected: `send_message`, `send_keys`, `close` and
 - Keybindings: `~/.showrunner/keybindings.toml` (start from
   `keybindings.example.toml`)
 
+### Task boards (in progress)
+
+Kanban boards whose cards get dispatched to agent sessions. A board maps a
+provider (native, plane, github, jira) to a showrunner project; `native` uses
+showrunner's own tasks that have a board column set.
+
+```toml
+[dispatch]
+max_running = 2   # global cap
+poll_secs = 60
+
+[[boards]]
+name = "sessionizer"
+provider = "native"
+project = "tmux-sessionizer"
+agent = "claude"
+max_running = 2   # per-board cap
+
+# [boards.plane]      url / workspace / project_id / api_key_env
+# [boards.github]     owner / project_number / status_field
+# [boards.jira]       url / project_key / email_env / api_token_env
+# [boards.columns]    provider state name -> canonical column
+```
+
 ## License
 
 MIT

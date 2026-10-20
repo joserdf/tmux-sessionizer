@@ -329,6 +329,19 @@ pub struct Task {
     /// Archived: hidden from default view, sessions killed but worktrees/branches/context preserved.
     #[serde(default, skip_serializing_if = "is_false")]
     pub archived: bool,
+    /// Board column this task is a card in. `None` means the task is a plain
+    /// human-made task: it never appears on a board and is never dispatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<crate::tasks::Column>,
+    /// Card body text, if the task is a card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Board comments left on the card.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// Links recorded on the card (branch / PR / session).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<crate::tasks::TaskLink>,
 }
 
 impl Task {
@@ -547,6 +560,12 @@ pub struct Config {
     /// The MCP server (`showrunner mcp`). A table.
     #[serde(default)]
     pub mcp: crate::mcp::McpConfig,
+    /// Global task-board dispatch loop settings. A table.
+    #[serde(default)]
+    pub dispatch: crate::tasks::DispatchConfig,
+    /// Task boards (kanban columns dispatched to agent sessions). Tables.
+    #[serde(default)]
+    pub boards: Vec<crate::tasks::BoardConfig>,
 }
 
 /// Root directory for all showrunner data: ~/.showrunner
@@ -885,6 +904,10 @@ impl Config {
                     branch,
                     base_branch: None,
                     archived: false,
+                    column: None,
+                    body: None,
+                    notes: vec![],
+                    links: vec![],
                 });
                 return true;
             }
@@ -1006,6 +1029,10 @@ mod tests {
             branch: branch.into(),
             base_branch: base.map(str::to_string),
             archived: false,
+            column: None,
+            body: None,
+            notes: vec![],
+            links: vec![],
         }
     }
 
