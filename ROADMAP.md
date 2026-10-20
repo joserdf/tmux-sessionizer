@@ -311,6 +311,13 @@ Open questions:
   work and gather results. This shares the spawn path with the Phase 5
   dispatcher. (thurbox Fleet, Herdr agent-automation)
 
+**Status (2026-10-20):** all three are in. The message queue landed earlier.
+Fork: `showrunner fork`, the sessions view `F` key and the MCP `fork` tool; a
+fork shares the source's worktree, and Pi has no fork. Orchestration takes
+the parent task session instead of a project: `spawn_worker(parent, prompt,
+agent?)` starts a session of the parent's task in its own worktree, so workers
+merge back like any other session of the task.
+
 ### Phase 7 — Observability and reach
 
 - **Token cost per session** in the `RES` column and the resource panel, read
@@ -318,6 +325,13 @@ Open questions:
 - **Phone notifications** via ntfy or Telegram on `question` / `permission` /
   board Needs you, sent from the daemon next to the OS notifier. (Agent Deck,
   Herdr plugin)
+
+**Status (2026-10-20):** token cost is in. Phone notifications go through
+carcara-duo (Telegram) rather than the daemon: the daemon serves MCP over
+streamable HTTP at `/mcp` with a bearer token (`~/.showrunner/mcp_token`),
+and duo polls status and turns permission and question prompts into Telegram
+cards that call `approve` / `answer`. The duo side lives in the carcara-duo
+repo.
 
 ### Phase 8 — Agents and review
 
@@ -329,6 +343,10 @@ Open questions:
 - **`.worktreeinclude`**: also honour a repo-level `.worktreeinclude`
   (gitignore syntax) in addition to the per-project `copy_patterns`. (CCManager,
   Agent Deck)
+
+**Status (2026-10-20):** diff comments and `.worktreeinclude` are in. The TUI
+forwards hunk/difit comments, and the web diff view takes per-line notes sent
+through `POST /api/sessions/{name}/review`. Agents as data is not started.
 
 ### Not planned
 
