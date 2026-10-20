@@ -31,6 +31,18 @@
   <main id="board">
     <div class="empty" id="loading">connecting…</div>
   </main>
+  <aside id="panel" class="panel" hidden>
+    <div class="panel-header">
+      <span class="panel-title" id="panel-title"></span>
+      <div class="panel-tabs">
+        <button id="tab-output" class="tab active">output</button>
+        <button id="tab-diff" class="tab">diff</button>
+      </div>
+      <button id="panel-close" class="panel-close" aria-label="close">✕</button>
+    </div>
+    <pre id="panel-output" class="panel-content"></pre>
+    <pre id="panel-diff" class="panel-content" hidden></pre>
+  </aside>
   <div id="toast" hidden></div>
   <script src="/board.js"></script>
 </body>

@@ -11,11 +11,22 @@ const COLUMN_LABELS = {
   done: "done",
 };
 
+const STATUS_LABEL = {
+  idle: "idle",
+  working: "working",
+  done: "done",
+  error: "error",
+  question: "question",
+  permission: "permission",
+};
+
 let boards = [];
 let selectedName = null;
 let paused = false;
 let dragging = null; // { id, from }
 let refreshPending = false;
+let panelSession = null; // tmux name of the open card panel
+let panelTab = "output";
 
 // ---------- helpers ----------
 
@@ -73,6 +84,7 @@ async function refresh() {
   const board = currentBoard();
   if (board) paused = !!board.paused;
   render();
+  if (panelSession) loadPanel();
 }
 
 /// Debounced re-fetch (SSE events can arrive in bursts).
@@ -166,6 +178,12 @@ function cardEl(card) {
 
   if (card.session) {
     node.append(el("span", "card-session", `⌂ ${card.session}`));
+    if (card.status) {
+      node.append(
+        el("span", `card-status status-${card.status}`, STATUS_LABEL[card.status] || card.status)
+      );
+    }
+    node.addEventListener("click", () => openPanel(card.session, card.title));
   }
 
   node.addEventListener("dragstart", () => {
@@ -193,6 +211,65 @@ async function moveCard(id, from, column) {
   } catch (e) {
     toast(e.message, true);
     refresh(); // revert to the server's view of the board
+  }
+}
+
+// ---------- output / diff panel ----------
+
+function openPanel(session, title) {
+  panelSession = session;
+  $("panel-title").textContent = title || session;
+  $("panel").hidden = false;
+  $("panel-output").textContent = "";
+  $("panel-diff").textContent = "";
+  switchTab("output"); // also loads the panel
+}
+
+function closePanel() {
+  panelSession = null;
+  $("panel").hidden = true;
+}
+
+function switchTab(tab) {
+  panelTab = tab;
+  $("tab-output").classList.toggle("active", tab === "output");
+  $("tab-diff").classList.toggle("active", tab === "diff");
+  $("panel-output").hidden = tab !== "output";
+  $("panel-diff").hidden = tab !== "diff";
+  loadPanel();
+}
+
+/// Plain text of captured pane output: drop ANSI escape sequences (colors,
+/// cursor moves, OSC titles) since the panel shows text, not a terminal.
+function stripAnsi(text) {
+  return text.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g, "");
+}
+
+async function loadPanel() {
+  if (!panelSession) return;
+  const outputEl = $("panel-output");
+  const diffEl = $("panel-diff");
+  const target = panelTab === "output" ? outputEl : diffEl;
+  // Only show a placeholder on first load, so periodic refreshes don't flash.
+  if (!target.textContent) target.textContent = "loading…";
+  if (panelTab === "output") {
+    try {
+      const data = await api(
+        `/api/sessions/${encodeURIComponent(panelSession)}/output?lines=1000`
+      );
+      const atBottom = outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight < 20;
+      outputEl.textContent = stripAnsi((data && data.text) || "");
+      if (atBottom) outputEl.scrollTop = outputEl.scrollHeight;
+    } catch (e) {
+      outputEl.textContent = `output unavailable: ${e.message}`;
+    }
+  } else {
+    try {
+      const data = await api(`/api/diff?session=${encodeURIComponent(panelSession)}`);
+      diffEl.textContent = (data && data.text) || "";
+    } catch (e) {
+      diffEl.textContent = `no diff: ${e.message}`;
+    }
   }
 }
 
@@ -250,6 +327,12 @@ $("board-select").onchange = (e) => {
 $("dispatch-btn").onclick = () => runDispatch(false);
 $("dry-run-btn").onclick = () => runDispatch(true);
 $("pause-btn").onclick = togglePause;
+$("panel-close").onclick = closePanel;
+$("tab-output").onclick = () => switchTab("output");
+$("tab-diff").onclick = () => switchTab("diff");
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("panel").hidden) closePanel();
+});
 
 let eventSource = null;
 function openStateStream() {

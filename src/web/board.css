@@ -224,3 +224,88 @@ body {
 
 .column .empty-lane { color: var(--faint); font-size: 11px; text-align: center; padding: 18px 0; }
 
+/* Agent status badge on a card, reusing the main UI's activity palette. */
+.card-status {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  align-self: flex-start;
+}
+.card-status.status-working { color: var(--amber); background: rgba(255, 180, 84, 0.1); border-color: rgba(255, 180, 84, 0.4); }
+.card-status.status-idle { color: var(--green); background: rgba(127, 217, 98, 0.08); border-color: rgba(127, 217, 98, 0.35); }
+.card-status.status-done { color: var(--faint); background: rgba(58, 67, 88, 0.15); }
+.card-status.status-error,
+.card-status.status-question,
+.card-status.status-permission { color: var(--red); background: rgba(242, 109, 120, 0.1); border-color: rgba(242, 109, 120, 0.4); animation: pulse 1.4s ease-in-out infinite; }
+
+/* Right-side output / diff panel. */
+#panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  width: min(46vw, 560px);
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 28px rgba(0, 0, 0, 0.4);
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.015);
+}
+.panel-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.panel-tabs { display: flex; gap: 4px; flex-shrink: 0; }
+.panel-tabs .tab {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 4px 10px;
+}
+.panel-tabs .tab.active { color: #1a1204; background: var(--amber); border-color: var(--amber); font-weight: 600; }
+.panel-close {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 3px 9px;
+  flex-shrink: 0;
+}
+.panel-close:active { background: #232a3d; }
+.panel-content {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+

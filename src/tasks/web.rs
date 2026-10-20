@@ -38,8 +38,15 @@ pub fn card_session<'a>(
         .map(|(name, _)| name.as_str())
 }
 
-/// One card's JSON, with its owning tmux session (or null when undispatched).
-pub fn card_json(card: &Card, session: Option<&str>) -> Value {
+/// Agent status code for a tmux session, or None when it can't be read.
+/// Only used by the live board handler; tests inject their own resolver.
+pub(crate) fn session_status_code(name: &str) -> Option<String> {
+    crate::tmux::session_agent_status(name).map(|s| s.code().to_string())
+}
+
+/// One card's JSON, with its owning tmux session (or null when undispatched)
+/// and the session's agent status (or null when unknown).
+pub fn card_json(card: &Card, session: Option<&str>, status: Option<&str>) -> Value {
     json!({
         "id": card.id.0,
         "key": card.key,
@@ -50,6 +57,7 @@ pub fn card_json(card: &Card, session: Option<&str>) -> Value {
         "priority": card.priority,
         "url": card.url,
         "session": session,
+        "status": status,
     })
 }
 
@@ -59,6 +67,7 @@ pub fn board_json(
     cfg: &mut Config,
     board: &BoardConfig,
     sessions: &HashMap<String, SessionRecord>,
+    status_of: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Value> {
     let cards = {
         let provider = provider_for(cfg, board)?;
@@ -70,7 +79,11 @@ pub fn board_json(
             let column_cards: Vec<Value> = cards
                 .iter()
                 .filter(|c| c.column == *col)
-                .map(|c| card_json(c, card_session(sessions, &board.project, &c.id)))
+                .map(|c| {
+                    let session = card_session(sessions, &board.project, &c.id);
+                    let status = session.and_then(status_of);
+                    card_json(c, session, status.as_deref())
+                })
                 .collect();
             json!({ "column": col, "cards": column_cards })
         })
@@ -88,11 +101,12 @@ pub fn board_json(
 pub fn boards_json(
     cfg: &mut Config,
     sessions: &HashMap<String, SessionRecord>,
+    status_of: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<Value>> {
     let boards = cfg.boards.clone();
     let mut out = Vec::new();
     for board in &boards {
-        match board_json(cfg, board, sessions) {
+        match board_json(cfg, board, sessions, status_of) {
             Ok(v) => out.push(v),
             Err(e) => eprintln!("board {}: {e:#}", board.name),
         }
@@ -167,6 +181,16 @@ mod tests {
         }
     }
 
+    /// Injectable status resolver: the card's "s1" session is `working`,
+    /// everything else unknown. Lets tests assert the `status` field without
+    /// touching tmux.
+    fn stub_status(name: &str) -> Option<String> {
+        match name {
+            "s1" => Some("working".to_string()),
+            _ => None,
+        }
+    }
+
     fn cfg_with_board() -> Config {
         let mut cfg = Config::default();
         cfg.dispatch.max_running = 2;
@@ -206,7 +230,7 @@ mod tests {
         let mut sessions = HashMap::new();
         sessions.insert("s1".to_string(), session("proj", Some("fix/bug")));
 
-        let boards = boards_json(&mut cfg, &sessions).unwrap();
+        let boards = boards_json(&mut cfg, &sessions, &stub_status).unwrap();
         assert_eq!(boards.len(), 1);
         let b = &boards[0];
         assert_eq!(b["name"], "b");
@@ -224,11 +248,14 @@ mod tests {
         assert_eq!(backlog_cards[0]["id"], "fix/bug");
         assert_eq!(backlog_cards[0]["column"], "backlog");
         assert_eq!(backlog_cards[0]["session"], "s1");
+        // A card whose session reports a status carries it.
+        assert_eq!(backlog_cards[0]["status"], "working");
 
-        // A card with no session record reports null.
+        // A card with no session record reports null for session and status.
         let running_cards = columns[2]["cards"].as_array().unwrap();
         assert_eq!(running_cards.len(), 1);
         assert_eq!(running_cards[0]["session"], Value::Null);
+        assert_eq!(running_cards[0]["status"], Value::Null);
 
         // Empty columns still appear with an empty cards array.
         assert_eq!(columns[1]["cards"].as_array().unwrap().len(), 0);
@@ -254,7 +281,36 @@ mod tests {
             jira: None,
             columns: HashMap::new(),
         });
-        assert!(boards_json(&mut cfg, &HashMap::new()).unwrap().is_empty());
+        assert!(
+            boards_json(&mut cfg, &HashMap::new(), &stub_status)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn card_json_embeds_session_status() {
+        let task = card_task("Fix bug", "fix/bug", Column::Running);
+        let card = Card {
+            id: CardId("fix/bug".to_string()),
+            key: "K-1".to_string(),
+            title: task.name.clone(),
+            body: task.body.clone().unwrap_or_default(),
+            column: task.column.unwrap(),
+            labels: vec![],
+            priority: None,
+            url: None,
+        };
+
+        // With a known status.
+        let with_status = card_json(&card, Some("s1"), Some("working"));
+        assert_eq!(with_status["session"], "s1");
+        assert_eq!(with_status["status"], "working");
+
+        // Without a session, status is null too.
+        let bare = card_json(&card, None, None);
+        assert_eq!(bare["session"], Value::Null);
+        assert_eq!(bare["status"], Value::Null);
     }
 
     #[test]

@@ -667,7 +667,12 @@ async fn api_boards() -> Result<axum::Json<Value>, ApiError> {
     let boards = tokio::task::spawn_blocking(|| {
         let mut cfg = Config::load().map_err(internal)?;
         let sessions = config::load_sessions();
-        crate::tasks::web::boards_json(&mut cfg, &sessions).map_err(internal)
+        crate::tasks::web::boards_json(
+            &mut cfg,
+            &sessions,
+            &crate::tasks::web::session_status_code,
+        )
+        .map_err(internal)
     })
     .await
     .map_err(internal)??;
