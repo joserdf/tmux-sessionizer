@@ -354,9 +354,15 @@ pub fn create_session(
             bail!("Failed to create worktree: {stderr}");
         }
 
-        // Always copy .claude/ folder, plus any configured patterns (sync, before hooks setup)
+        // Always copy .claude/ folder, plus any configured patterns and the
+        // repo-level .worktreeinclude (sync, before hooks setup)
         let mut all_patterns = vec![".claude/***".to_string()];
         all_patterns.extend_from_slice(copy_patterns);
+        for pattern in read_worktreeinclude(Path::new(project_path)) {
+            if !all_patterns.contains(&pattern) {
+                all_patterns.push(pattern);
+            }
+        }
         copy_patterns_to_worktree(project_path, &worktree_path_str, &all_patterns);
 
         // Run setup commands in the new worktree if configured
@@ -1443,6 +1449,62 @@ pub fn kill_session_with_fallback(name: &str, fallback: Option<SessionCleanupInf
     Ok(())
 }
 
+/// Read a repo-level `.worktreeinclude` file, if present. Lines use gitignore
+/// syntax: blank lines and `#` comments are skipped and trailing whitespace is
+/// trimmed. Returns the remaining patterns (empty when the file is absent).
+fn read_worktreeinclude(project_path: &Path) -> Vec<String> {
+    let path = project_path.join(".worktreeinclude");
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Rewrite a directory pattern `build/` so it matches its contents too; a
+/// bare `build/` matches only the directory, which rsync would leave empty.
+fn normalize_pattern(pattern: &str) -> String {
+    match pattern.strip_suffix('/') {
+        Some(dir) => format!("{dir}/***"),
+        None => pattern.to_string(),
+    }
+}
+
+/// Build the rsync filter arguments for `patterns` (everything before the
+/// src/dst paths). Positive patterns become `--include` rules; `!`-negated
+/// patterns become `--exclude` rules placed first so that, with rsync's
+/// first-match-wins, a negation overrides a broader include. `.git` is always
+/// excluded, `--include '*/'` lets nested paths like `config/local.env` be
+/// reached, and `-m` (--prune-empty-dirs) drops the empty parent dirs.
+fn build_rsync_filter_args(patterns: &[String]) -> Vec<String> {
+    let mut args = vec!["-a".to_string(), "-m".to_string()];
+    args.push("--exclude".to_string());
+    args.push(".git".to_string());
+    for pattern in patterns {
+        if let Some(negated) = pattern.strip_prefix('!') {
+            args.push("--exclude".to_string());
+            args.push(normalize_pattern(negated));
+        }
+    }
+    for pattern in patterns {
+        if !pattern.starts_with('!') {
+            args.push("--include".to_string());
+            args.push(normalize_pattern(pattern));
+        }
+    }
+    // Traverse every directory so nested patterns can be reached; `-m` prunes
+    // any that end up with no copied files.
+    args.push("--include".to_string());
+    args.push("*/".to_string());
+    args.push("--exclude".to_string());
+    args.push("*".to_string());
+    args
+}
+
 /// Copy specific file patterns from the project into a new worktree.
 /// Patterns can be files (`.env`) or directories (`build/`).
 fn copy_patterns_to_worktree(project_path: &str, worktree_path: &str, patterns: &[String]) {
@@ -1458,14 +1520,7 @@ fn copy_patterns_to_worktree(project_path: &str, worktree_path: &str, patterns: 
         format!("{worktree_path}/")
     };
 
-    let mut args = vec!["-a".to_string()];
-    for pattern in patterns {
-        args.push("--include".to_string());
-        args.push(pattern.to_string());
-    }
-    // Exclude everything not matched
-    args.push("--exclude".to_string());
-    args.push("*".to_string());
+    let mut args = build_rsync_filter_args(patterns);
     args.push(src);
     args.push(dst);
 
@@ -3235,4 +3290,163 @@ Some transcript output.\n\
         assert!(!config_has_top_level_notify("notification = true\n"));
     }
 
+    // --- .worktreeinclude / copy patterns ---
+
+    /// Copy `files` into a throwaway src dir, run the rsync copy with `patterns`,
+    /// and return the relative paths (dirs with a trailing `/`) present in dst.
+    fn copied_with(patterns: &[String], files: &[&str]) -> Vec<String> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("sr_wtinclude_{}_{}", std::process::id(), id));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        for file in files {
+            let path = src.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x").unwrap();
+        }
+        copy_patterns_to_worktree(&src.to_string_lossy(), &dst.to_string_lossy(), patterns);
+
+        fn collect(root: &Path, dir: &Path, out: &mut Vec<String>) {
+            if !dir.exists() {
+                return;
+            }
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                if path.is_dir() {
+                    out.push(format!("{rel}/"));
+                    collect(root, &path, out);
+                } else {
+                    out.push(rel);
+                }
+            }
+        }
+
+        let mut copied = Vec::new();
+        collect(&dst, &dst, &mut copied);
+        let _ = std::fs::remove_dir_all(&dir);
+        copied.sort();
+        copied
+    }
+
+    #[test]
+    fn worktreeinclude_copies_top_level_file_only() {
+        let copied = copied_with(&[".env".into()], &[".env", "keep.txt"]);
+        assert_eq!(copied, vec![".env"]);
+    }
+
+    #[test]
+    fn worktreeinclude_copies_nested_file_and_prunes_unmatched_dir() {
+        // `config/local.env` is reached via `--include '*/'`; `config` keeps
+        // its matched file, while an unmatched `empty/` dir is pruned by `-m`.
+        let copied = copied_with(
+            &["config/local.env".into()],
+            &["config/local.env", "config/other.txt", "empty/stray.txt"],
+        );
+        assert_eq!(copied, vec!["config/", "config/local.env"]);
+    }
+
+    #[test]
+    fn worktreeinclude_copies_glob() {
+        let copied = copied_with(&["certs/*.pem".into()], &["certs/a.pem", "certs/b.txt"]);
+        assert_eq!(copied, vec!["certs/", "certs/a.pem"]);
+    }
+
+    #[test]
+    fn worktreeinclude_copies_directory_pattern_contents() {
+        let copied = copied_with(&["build/".into()], &["build/out.o", "build/inner.txt"]);
+        assert_eq!(copied, vec!["build/", "build/inner.txt", "build/out.o"]);
+    }
+
+    #[test]
+    fn worktreeinclude_negation_excludes_just_the_named_path() {
+        let copied = copied_with(
+            &["*.pem".into(), "!certs/keep.pem".into()],
+            &["root.pem", "certs/a.pem", "certs/keep.pem"],
+        );
+        assert_eq!(copied, vec!["certs/", "certs/a.pem", "root.pem"]);
+    }
+
+    #[test]
+    fn worktreeinclude_leaves_no_unmatched_files_or_empty_dirs() {
+        // A pattern whose parent dir has no matching file copies nothing and
+        // leaves no directory behind.
+        let copied = copied_with(
+            &["nested/deep.env".into()],
+            &["nested/other.txt", "top.txt"],
+        );
+        assert!(copied.is_empty());
+    }
+
+    #[test]
+    fn read_worktreeinclude_parses_lines() {
+        let dir = std::env::temp_dir().join(format!("sr_wtinclude_read_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".worktreeinclude"),
+            "# local secrets\n\n.env   \ncerts/*.pem\n!certs/keep.pem\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_worktreeinclude(&dir),
+            vec![".env", "certs/*.pem", "!certs/keep.pem"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_worktreeinclude_missing_file_is_empty() {
+        let dir = std::env::temp_dir().join(format!("sr_wtinclude_missing_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(read_worktreeinclude(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_rsync_filter_args_orders_negations_before_includes() {
+        let args = build_rsync_filter_args(&[
+            "*.pem".into(),
+            "!certs/keep.pem".into(),
+            ".env".into(),
+            "build/".into(),
+        ]);
+        assert_eq!(
+            args,
+            vec![
+                "-a",
+                "-m",
+                "--exclude",
+                ".git",
+                "--exclude",
+                "certs/keep.pem",
+                "--include",
+                "*.pem",
+                "--include",
+                ".env",
+                "--include",
+                "build/***",
+                "--include",
+                "*/",
+                "--exclude",
+                "*",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_rsync_filter_args_normalizes_only_dir_patterns() {
+        let args = build_rsync_filter_args(&["build/".into(), ".env".into()]);
+        let joined = args.join(" ");
+        assert!(joined.contains("--include build/***"));
+        assert!(joined.contains("--include .env"));
+        assert!(!joined.contains("--include .env/"));
+    }
 }

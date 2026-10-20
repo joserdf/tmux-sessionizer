@@ -195,6 +195,9 @@ and `close` needs `confirm: true`. Queued messages survive daemon restarts
 - State: `~/.showrunner/` (projects, tasks, session records, worktrees)
 - Cache + daemon runtime: `~/.cache/tmux-sessionizer/` (status-bar cache,
   `server.pid`, `server.log`)
+- Files copied into new worktrees: per-project `copy_patterns` in the config,
+  plus a repo-level `.worktreeinclude` file (gitignore syntax) at the project
+  root listing untracked/ignored files (e.g. `.env`) to copy as well
 - Keybindings: `~/.showrunner/keybindings.toml` (start from
   `keybindings.example.toml`)
 
