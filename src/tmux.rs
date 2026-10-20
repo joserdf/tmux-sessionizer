@@ -1451,7 +1451,9 @@ pub fn kill_session_with_fallback(name: &str, fallback: Option<SessionCleanupInf
 
 /// Read a repo-level `.worktreeinclude` file, if present. Lines use gitignore
 /// syntax: blank lines and `#` comments are skipped and trailing whitespace is
-/// trimmed. Returns the remaining patterns (empty when the file is absent).
+/// trimmed. Directory patterns like `build/` are rewritten to `build/***` so
+/// their contents are copied recursively. Returns the remaining patterns
+/// (empty when the file is absent).
 fn read_worktreeinclude(project_path: &Path) -> Vec<String> {
     let path = project_path.join(".worktreeinclude");
     let Ok(content) = fs::read_to_string(path) else {
@@ -1461,7 +1463,7 @@ fn read_worktreeinclude(project_path: &Path) -> Vec<String> {
         .lines()
         .map(str::trim_end)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_string)
+        .map(normalize_pattern)
         .collect()
 }
 
@@ -1480,6 +1482,9 @@ fn normalize_pattern(pattern: &str) -> String {
 /// first-match-wins, a negation overrides a broader include. `.git` is always
 /// excluded, `--include '*/'` lets nested paths like `config/local.env` be
 /// reached, and `-m` (--prune-empty-dirs) drops the empty parent dirs.
+/// Patterns are passed through unchanged: `.worktreeinclude` patterns arrive
+/// already normalized (e.g. `build/` -> `build/***`) by `read_worktreeinclude`,
+/// while `copy_patterns` keep their pre-existing form.
 fn build_rsync_filter_args(patterns: &[String]) -> Vec<String> {
     let mut args = vec!["-a".to_string(), "-m".to_string()];
     args.push("--exclude".to_string());
@@ -1487,13 +1492,13 @@ fn build_rsync_filter_args(patterns: &[String]) -> Vec<String> {
     for pattern in patterns {
         if let Some(negated) = pattern.strip_prefix('!') {
             args.push("--exclude".to_string());
-            args.push(normalize_pattern(negated));
+            args.push(negated.to_string());
         }
     }
     for pattern in patterns {
         if !pattern.starts_with('!') {
             args.push("--include".to_string());
-            args.push(normalize_pattern(pattern));
+            args.push(pattern.to_string());
         }
     }
     // Traverse every directory so nested patterns can be reached; `-m` prunes
@@ -3360,7 +3365,9 @@ Some transcript output.\n\
 
     #[test]
     fn worktreeinclude_copies_directory_pattern_contents() {
-        let copied = copied_with(&["build/".into()], &["build/out.o", "build/inner.txt"]);
+        // A `.worktreeinclude` dir pattern is normalized to `build/***` by
+        // `read_worktreeinclude`, so its contents are copied recursively.
+        let copied = copied_with(&["build/***".into()], &["build/out.o", "build/inner.txt"]);
         assert_eq!(copied, vec!["build/", "build/inner.txt", "build/out.o"]);
     }
 
@@ -3391,12 +3398,14 @@ Some transcript output.\n\
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join(".worktreeinclude"),
-            "# local secrets\n\n.env   \ncerts/*.pem\n!certs/keep.pem\n",
+            "# local secrets\n\n.env   \ncerts/*.pem\n!certs/keep.pem\nbuild/\n",
         )
         .unwrap();
+        // Dir patterns are normalized to the recursive form here (not for
+        // copy_patterns).
         assert_eq!(
             read_worktreeinclude(&dir),
-            vec![".env", "certs/*.pem", "!certs/keep.pem"]
+            vec![".env", "certs/*.pem", "!certs/keep.pem", "build/***"]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3432,7 +3441,7 @@ Some transcript output.\n\
                 "--include",
                 ".env",
                 "--include",
-                "build/***",
+                "build/",
                 "--include",
                 "*/",
                 "--exclude",
@@ -3442,11 +3451,26 @@ Some transcript output.\n\
     }
 
     #[test]
-    fn build_rsync_filter_args_normalizes_only_dir_patterns() {
+    fn build_rsync_filter_args_passes_copy_patterns_unchanged() {
+        // copy_patterns (incl. a dir pattern) are passed to rsync verbatim;
+        // only .worktreeinclude patterns are normalized (in read_worktreeinclude).
         let args = build_rsync_filter_args(&["build/".into(), ".env".into()]);
-        let joined = args.join(" ");
-        assert!(joined.contains("--include build/***"));
-        assert!(joined.contains("--include .env"));
-        assert!(!joined.contains("--include .env/"));
+        assert_eq!(
+            args,
+            vec![
+                "-a",
+                "-m",
+                "--exclude",
+                ".git",
+                "--include",
+                "build/",
+                "--include",
+                ".env",
+                "--include",
+                "*/",
+                "--exclude",
+                "*",
+            ]
+        );
     }
 }

@@ -197,7 +197,9 @@ and `close` needs `confirm: true`. Queued messages survive daemon restarts
   `server.pid`, `server.log`)
 - Files copied into new worktrees: per-project `copy_patterns` in the config,
   plus a repo-level `.worktreeinclude` file (gitignore syntax) at the project
-  root listing untracked/ignored files (e.g. `.env`) to copy as well
+  root listing untracked/ignored files (e.g. `.env`) to copy as well; a
+  trailing-slash directory pattern (e.g. `build/`) there copies the directory
+  recursively
 - Keybindings: `~/.showrunner/keybindings.toml` (start from
   `keybindings.example.toml`)
 
