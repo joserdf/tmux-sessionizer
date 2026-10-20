@@ -302,6 +302,19 @@ navigate, `Tab` cycles boards. `Enter` switches the tmux client to the session
 serving a card, `m` moves it to another column, `D` runs one dispatch pass, `p`
 toggles dispatch pause and `r` reloads (it also auto-reloads every ~2s).
 
+### More agents (`agents.toml`)
+
+Claude Code, Codex, Pi and OpenCode are built in. Gemini CLI (`gemini`),
+Copilot CLI (`copilot`), Cursor Agent (`cursor`) and Amp (`amp`) are defined as
+data in the bundled [`src/agents.toml`](src/agents.toml), and
+`~/.showrunner/agents.toml` adds agents or overrides those by id, with no
+recompile. Each entry gives the launch argv, how to pass a first prompt, the
+argv that resumes the latest conversation, the process name, and the screen
+markers of a permission prompt. These agents have no hooks: their status
+comes from the pane (working while output changes, `permission` when an
+attention marker shows), and fork and token usage are not available. The
+Cursor Agent and Amp entries were written from their docs and are unverified.
+
 ### Token usage & pricing
 
 Each session's token usage is read from its transcript and shown per window in

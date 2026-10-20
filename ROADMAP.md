@@ -346,7 +346,11 @@ repo.
 
 **Status (2026-10-20):** diff comments and `.worktreeinclude` are in. The TUI
 forwards hunk/difit comments, and the web diff view takes per-line notes sent
-through `POST /api/sessions/{name}/review`. Agents as data is not started.
+through `POST /api/sessions/{name}/review`. Agents as data is hybrid: the four
+built-ins stay in code (hooks, transcripts, usage), and Gemini, Copilot CLI,
+Cursor Agent and Amp are `agents.toml` entries (bundled, overridable from
+`~/.showrunner/agents.toml`) with pane-scraped status. Cursor and Amp are
+unverified (not installed).
 
 ### Not planned
 

@@ -207,7 +207,7 @@ fn transcript(kind: AgentKind, id: &str) -> Option<(Vec<String>, String)> {
             let path = codex_transcript(&home.join(".codex/sessions"), id)?;
             Some((Vec::new(), codex_text(&read_tail(&path)?)))
         }
-        AgentKind::Pi | AgentKind::OpenCode => None,
+        AgentKind::Pi | AgentKind::OpenCode | AgentKind::Custom(_) => None,
     }
 }
 

@@ -109,6 +109,10 @@ fn is_runtime(arg0: &str) -> bool {
 /// doesn't send it again. Without a session id (or for Pi, which has no
 /// resume id) `argv` is returned unchanged.
 pub fn resume_command(kind: AgentKind, argv: &[String], session_id: Option<&str>) -> Vec<String> {
+    // A TOML agent resumes its latest conversation in the cwd, if it can.
+    if let Some(def) = kind.def() {
+        return if def.resume.is_empty() { argv.to_vec() } else { def.resume.clone() };
+    }
     let (Some(id), false) = (session_id, kind == AgentKind::Pi || argv.is_empty()) else {
         return argv.to_vec();
     };
@@ -173,7 +177,8 @@ pub fn fork_command(
     argv: &[String],
     session_id: Option<&str>,
 ) -> Option<Vec<String>> {
-    let (Some(id), false) = (session_id, kind == AgentKind::Pi || argv.is_empty()) else {
+    let cannot_fork = kind == AgentKind::Pi || kind.def().is_some() || argv.is_empty();
+    let (Some(id), false) = (session_id, cannot_fork) else {
         return None;
     };
     let prog_len = (1 + usize::from(is_runtime(&argv[0]))).min(argv.len());
@@ -730,6 +735,16 @@ mod tests {
             fork(AgentKind::OpenCode, "opencode --continue", Some("ID")),
             Some("opencode -s ID --fork".to_string())
         );
+    }
+
+    #[test]
+    fn custom_agents_resume_latest_and_cannot_fork() {
+        let copilot = AgentKind::from_id("copilot").unwrap();
+        assert_eq!(
+            resume(copilot, "copilot --yolo -i task", None),
+            "copilot --yolo --continue"
+        );
+        assert_eq!(fork(copilot, "copilot --yolo", Some("ID")), None);
     }
 
     #[test]

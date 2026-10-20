@@ -133,7 +133,7 @@ struct CreateSession {
     name: String,
     #[schemars(description = "Working directory (~ allowed)")]
     cwd: String,
-    #[schemars(description = "Start this agent: claude, codex, pi or opencode")]
+    #[schemars(description = "Start this agent: claude, codex, pi, opencode, or an agents.toml id (gemini, copilot, cursor, amp, ...)")]
     agent: Option<String>,
     #[schemars(description = "First prompt for the agent")]
     prompt: Option<String>,
@@ -145,7 +145,7 @@ struct CreateWindow {
     session: String,
     #[schemars(description = "Working directory (default: the session's active window's)")]
     cwd: Option<String>,
-    #[schemars(description = "Start this agent: claude, codex, pi or opencode")]
+    #[schemars(description = "Start this agent: claude, codex, pi, opencode, or an agents.toml id (gemini, copilot, cursor, amp, ...)")]
     agent: Option<String>,
     #[schemars(description = "First prompt for the agent")]
     prompt: Option<String>,
@@ -206,7 +206,7 @@ struct SpawnWorker {
     parent: String,
     #[schemars(description = "First prompt for the worker's agent")]
     prompt: String,
-    #[schemars(description = "claude, codex, pi or opencode (default: the parent's agent)")]
+    #[schemars(description = "Agent id: claude, codex, pi, opencode or an agents.toml id (default: the parent's agent)")]
     agent: Option<String>,
 }
 

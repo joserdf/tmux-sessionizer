@@ -224,7 +224,17 @@ pub fn update_statuses<'a>(
             continue;
         };
         st.update_view(pane.active && pane.attached, now);
-        let status = st.derive_status(pane, now);
+        let mut status = st.derive_status(pane, now);
+        // TOML agents have no hooks: an idle pane showing one of their
+        // attention markers is waiting on a permission or question.
+        if status == Some(AgentStatus::Idle)
+            && let Some(kind) = st.agent.as_deref().and_then(AgentKind::from_id)
+            && kind.def().is_some_and(|d| !d.attention_markers.is_empty())
+            && crate::control::capture(&pane.id, 40)
+                .is_ok_and(|text| crate::tmux::detect_attention_dialog(&text, kind))
+        {
+            status = Some(AgentStatus::Permission);
+        }
         if status != st.status {
             st.status = status;
             if let Some(s) = status {
@@ -398,7 +408,8 @@ pub fn detect_agent(
     command: &str,
     argv: impl FnOnce() -> Option<Vec<String>>,
 ) -> Option<AgentKind> {
-    if let Some(kind) = AgentKind::ALL
+    let kinds = AgentKind::all();
+    if let Some(kind) = kinds
         .iter()
         .copied()
         .find(|k| k.process_name() == command)
@@ -409,10 +420,10 @@ pub fn detect_agent(
         return None;
     }
     let argv = argv()?;
-    AgentKind::ALL.iter().copied().find(|k| {
+    kinds.into_iter().find(|k| {
         argv.iter().skip(1).any(|arg| {
             let base = arg.rsplit('/').next().unwrap_or(arg);
-            base.split('.').next() == Some(k.id())
+            base.split('.').next() == Some(k.process_name())
         })
     })
 }
@@ -584,6 +595,19 @@ mod tests {
         assert_eq!(detect_agent("node", argv), Some(AgentKind::Codex));
         let plain = || Some(vec!["node".into(), "server.js".into()]);
         assert_eq!(detect_agent("node", plain), None);
+    }
+
+    #[test]
+    fn detect_toml_agents_by_process_name() {
+        let gemini = || {
+            Some(vec![
+                "node".into(),
+                "/opt/node_modules/@google/gemini-cli/bundle/gemini.js".into(),
+            ])
+        };
+        assert_eq!(detect_agent("node", gemini), AgentKind::from_id("gemini"));
+        assert_eq!(detect_agent("copilot", || None), AgentKind::from_id("copilot"));
+        assert_eq!(detect_agent("cursor-agent", || None), AgentKind::from_id("cursor"));
     }
 
     #[test]

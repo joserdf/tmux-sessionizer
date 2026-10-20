@@ -1272,6 +1272,27 @@ pub(crate) fn build_agent_command(
             }
             cmd
         }
+        AgentKind::Custom(_) => {
+            let Some(def) = agent.def() else {
+                return String::new();
+            };
+            // No resume argv: start a fresh conversation instead.
+            let resume = resume && !def.resume.is_empty();
+            let mut words = if resume { def.resume.clone() } else { def.command.clone() };
+            // Like Codex, the system prompt rides on the first message. An
+            // agent without `prompt_args` gets neither.
+            if !resume && !def.prompt_args.is_empty() {
+                let prompt = match (system_prompt, initial_prompt) {
+                    (Some(sp), Some(p)) => Some(format!("{sp}\n\n{p}")),
+                    (Some(sp), None) => Some(sp.to_string()),
+                    (None, p) => p.map(str::to_string),
+                };
+                if let Some(prompt) = prompt {
+                    words.extend(def.prompt_args.iter().map(|a| a.replace("{prompt}", &prompt)));
+                }
+            }
+            crate::restore::shell_join(&words)
+        }
     }
 }
 
@@ -2518,7 +2539,7 @@ pub fn session_agent_status(session_name: &str) -> Option<crate::inventory::Agen
 /// while a dialog is open. Codex has no such guard: its selector line (`› 1.`)
 /// uses the same glyph as its input line, and its idle placeholder never
 /// matches the marker.
-fn detect_attention_dialog(content: &str, agent: AgentKind) -> bool {
+pub(crate) fn detect_attention_dialog(content: &str, agent: AgentKind) -> bool {
     let nonempty: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
 
     if agent == AgentKind::Claude {
@@ -3237,6 +3258,25 @@ Some transcript output.\n\
         assert_eq!(
             resumed,
             "pi --approve --continue --append-system-prompt 'briefing'"
+        );
+    }
+
+    #[test]
+    fn custom_agents_build_from_their_toml_entry() {
+        let gemini = AgentKind::from_id("gemini").unwrap();
+        assert_eq!(
+            build_agent_command(gemini, "/w", Some("brief"), Some("do it"), false),
+            "gemini --yolo -i 'brief\n\ndo it'"
+        );
+        assert_eq!(
+            build_agent_command(gemini, "/w", Some("brief"), None, true),
+            "gemini --yolo --resume latest"
+        );
+        // Amp takes no first prompt: it starts bare.
+        let amp = AgentKind::from_id("amp").unwrap();
+        assert_eq!(
+            build_agent_command(amp, "/w", Some("brief"), Some("do it"), false),
+            "amp --dangerously-allow-all"
         );
     }
 

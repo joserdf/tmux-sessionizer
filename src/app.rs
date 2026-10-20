@@ -1627,7 +1627,8 @@ impl App {
     /// chosen one feeds into `target`'s create flow.
     fn open_agent_picker(&mut self, target: AgentPickerTarget) {
         let keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
-        self.context_menu_items = AgentKind::ALL
+        let agents = AgentKind::all();
+        self.context_menu_items = agents
             .iter()
             .zip(keys)
             .map(|(agent, key)| ContextMenuItem {
@@ -1636,7 +1637,7 @@ impl App {
                 action: ContextAction::PickAgent(*agent),
             })
             .collect();
-        self.context_menu_selected = AgentKind::ALL
+        self.context_menu_selected = agents
             .iter()
             .position(|a| *a == self.default_agent())
             .unwrap_or(0);

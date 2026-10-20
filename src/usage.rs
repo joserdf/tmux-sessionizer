@@ -90,7 +90,7 @@ impl UsageCache {
                 AgentKind::Claude => usage = claude_usage_into(&text, &mut seen, usage),
                 AgentKind::Codex => usage = codex_usage_into(&text, usage),
                 AgentKind::Pi => usage = pi_usage_into(&text, &mut seen, usage),
-                AgentKind::OpenCode => return None,
+                AgentKind::OpenCode | AgentKind::Custom(_) => return None,
             }
             offset = len;
         }
@@ -151,6 +151,8 @@ pub fn token_usage(kind: AgentKind, id: Option<&str>, cwd: Option<&str>) -> Opti
             let path = pi_transcript(&home, cwd?)?;
             global().transcript(&path, kind)
         }
+        // TOML-defined agents have no known transcript format.
+        AgentKind::Custom(_) => None,
     }
 }
 

@@ -29,11 +29,11 @@ Managing tasks and sessions (usable from inside a session):
   showrunner list [--json] [--project <name>]
   showrunner task create <project> <name> [--branch <b>] [--base <b>]
                                            [--prompt <text>]
-                                           [--agent claude|codex|pi]
+                                           [--agent <id>]
   showrunner task set-base <project> <task> <branch>   ('main' resets)
   showrunner task delete <project> <task> --yes
   showrunner session create <project> <task> [--prompt <text>] [--no-worktree]
-                                              [--agent claude|codex|pi]
+                                              [--agent <id>]
   showrunner session kill <session> --yes
   showrunner fork <session>                    fork a session's agent into a new
                                                 tmux session (same worktree)

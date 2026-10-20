@@ -1,0 +1,63 @@
+# Agents beyond the built-in Claude Code, Codex, Pi and OpenCode.
+#
+# Each [[agent]] is launched, resumed and watched from these fields alone, so
+# adding one needs no recompile: put more entries (or an entry with the same
+# id, to override one below) in ~/.showrunner/agents.toml.
+#
+#   id                 Name used in config (`default_agent`) and on `--agent`.
+#   label, icon        Shown in pickers and session lists.
+#   command            Launch argv.
+#   prompt_args        Argv appended to pass a first prompt; `{prompt}` is
+#                      replaced by it. Empty: the agent can't take one.
+#   resume             Argv that resumes the latest conversation in the
+#                      working directory. Empty: no resume.
+#   process_name       Process to look for in the pane (default: the
+#                      basename of command[0]).
+#   attention_markers  Text that, near the bottom of the pane, means the
+#                      agent waits on the user (permission or question).
+#   prompt_chrome      Line prefixes of the input box and footer, trimmed off
+#                      captured output.
+#
+# These agents have no hooks: status comes from the pane alone (working while
+# output changes, attention when a marker shows, idle otherwise).
+
+[[agent]]
+id = "gemini"
+label = "Gemini CLI"
+icon = "✦"
+command = ["gemini", "--yolo"]
+prompt_args = ["-i", "{prompt}"]
+resume = ["gemini", "--yolo", "--resume", "latest"]
+attention_markers = ["Allow execution", "Waiting for user confirmation", "● 1."]
+prompt_chrome = ["╭", "╰", "│ >"]
+
+[[agent]]
+id = "copilot"
+label = "Copilot CLI"
+icon = "⊙"
+command = ["copilot", "--yolo"]
+prompt_args = ["-i", "{prompt}"]
+resume = ["copilot", "--yolo", "--continue"]
+attention_markers = ["Do you want to", "❯ 1."]
+prompt_chrome = ["╭", "╰", "│ >"]
+
+# Unverified: cursor-agent was not installed when this entry was written.
+[[agent]]
+id = "cursor"
+label = "Cursor Agent"
+icon = "⌖"
+command = ["cursor-agent", "--force"]
+prompt_args = ["{prompt}"]
+resume = ["cursor-agent", "--force", "resume"]
+process_name = "cursor-agent"
+attention_markers = ["Run this command?", "(y)"]
+
+# Unverified: amp was not installed when this entry was written. Amp takes no
+# first prompt on its interactive command line.
+[[agent]]
+id = "amp"
+label = "Amp"
+icon = "⚡"
+command = ["amp", "--dangerously-allow-all"]
+resume = ["amp", "--dangerously-allow-all", "threads", "continue"]
+attention_markers = ["Approve", "Allow?"]

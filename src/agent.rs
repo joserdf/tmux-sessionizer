@@ -3,6 +3,9 @@
 //! else (tmux, worktrees, status polling) is agent-agnostic.
 
 use std::fmt;
+use std::sync::OnceLock;
+
+use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentKind {
@@ -11,10 +14,88 @@ pub enum AgentKind {
     Codex,
     Pi,
     OpenCode,
+    /// A TOML-defined agent: an index into [`defs`].
+    Custom(u8),
 }
 
-/// Ids accepted in config (`default_agent`) and on `--agent`.
-pub const AGENT_IDS: &[&str] = &["claude", "codex", "pi", "opencode"];
+/// Ids of the agents built into the code.
+const BUILTIN_IDS: [&str; 4] = ["claude", "codex", "pi", "opencode"];
+
+/// An agent defined in TOML (see `src/agents.toml` for the fields). It has no
+/// hooks or transcript parsing: its status comes from the pane alone.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDef {
+    pub id: String,
+    pub label: String,
+    #[serde(default = "default_icon")]
+    pub icon: String,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub prompt_args: Vec<String>,
+    #[serde(default)]
+    pub resume: Vec<String>,
+    #[serde(default)]
+    pub process_name: Option<String>,
+    #[serde(default)]
+    pub attention_markers: Vec<String>,
+    #[serde(default)]
+    pub prompt_chrome: Vec<String>,
+}
+
+fn default_icon() -> String {
+    "\u{25c6}".to_string() // ◆
+}
+
+#[derive(Deserialize)]
+struct AgentsFile {
+    #[serde(default)]
+    agent: Vec<AgentDef>,
+}
+
+fn parse_defs(text: &str) -> anyhow::Result<Vec<AgentDef>> {
+    Ok(toml::from_str::<AgentsFile>(text)?.agent)
+}
+
+/// `extra` over `base` by id. Entries reusing a built-in id or without a
+/// command are skipped.
+fn merge_defs(mut base: Vec<AgentDef>, extra: Vec<AgentDef>) -> Vec<AgentDef> {
+    for def in extra {
+        if BUILTIN_IDS.contains(&def.id.as_str()) || def.command.is_empty() {
+            eprintln!("agents.toml: skipping agent '{}' (built-in id or empty command)", def.id);
+            continue;
+        }
+        match base.iter_mut().find(|d| d.id == def.id) {
+            Some(slot) => *slot = def,
+            None => base.push(def),
+        }
+    }
+    base
+}
+
+/// The TOML-defined agents: the bundled `agents.toml`, overridden and extended
+/// by `~/.showrunner/agents.toml` (not read under test). Loaded once.
+pub fn defs() -> &'static [AgentDef] {
+    static DEFS: OnceLock<Vec<AgentDef>> = OnceLock::new();
+    DEFS.get_or_init(|| {
+        let bundled = parse_defs(include_str!("agents.toml")).expect("bundled agents.toml");
+        let user = if cfg!(test) { Vec::new() } else { user_defs() };
+        let mut defs = merge_defs(merge_defs(Vec::new(), bundled), user);
+        defs.truncate(usize::from(u8::MAX));
+        defs
+    })
+}
+
+fn user_defs() -> Vec<AgentDef> {
+    let path = crate::config::Config::config_path().with_file_name("agents.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    parse_defs(&text).unwrap_or_else(|e| {
+        eprintln!("{}: {e:#}", path.display());
+        Vec::new()
+    })
+}
 
 impl AgentKind {
     pub fn from_id(id: &str) -> Option<Self> {
@@ -23,8 +104,30 @@ impl AgentKind {
             "codex" => Some(AgentKind::Codex),
             "pi" => Some(AgentKind::Pi),
             "opencode" => Some(AgentKind::OpenCode),
+            _ => defs()
+                .iter()
+                .position(|d| d.id == id)
+                .map(|i| AgentKind::Custom(i as u8)),
+        }
+    }
+
+    /// The TOML definition of a custom agent; `None` for built-ins.
+    pub fn def(self) -> Option<&'static AgentDef> {
+        match self {
+            AgentKind::Custom(i) => defs().get(usize::from(i)),
             _ => None,
         }
+    }
+
+    /// Every agent: the built-ins, then the TOML-defined ones.
+    pub fn all() -> Vec<AgentKind> {
+        let custom = (0..defs().len()).map(|i| AgentKind::Custom(i as u8));
+        Self::ALL.iter().copied().chain(custom).collect()
+    }
+
+    /// Ids accepted in config (`default_agent`) and on `--agent`.
+    pub fn ids() -> Vec<&'static str> {
+        Self::all().into_iter().map(Self::id).collect()
     }
 
     pub fn id(self) -> &'static str {
@@ -33,6 +136,7 @@ impl AgentKind {
             AgentKind::Codex => "codex",
             AgentKind::Pi => "pi",
             AgentKind::OpenCode => "opencode",
+            AgentKind::Custom(_) => self.def().map_or("?", |d| d.id.as_str()),
         }
     }
 
@@ -43,6 +147,7 @@ impl AgentKind {
             AgentKind::Codex => "\u{2b21}",  // ⬡ — hexagon, OpenAI-ish
             AgentKind::Pi => "\u{3c0}",      // π
             AgentKind::OpenCode => "\u{2b22}", // ⬢ — black hexagon
+            AgentKind::Custom(_) => self.def().map_or("?", |d| d.icon.as_str()),
         }
     }
 
@@ -53,6 +158,7 @@ impl AgentKind {
             AgentKind::Codex => "Codex CLI",
             AgentKind::Pi => "Pi",
             AgentKind::OpenCode => "OpenCode",
+            AgentKind::Custom(_) => self.def().map_or("?", |d| d.label.as_str()),
         }
     }
 
@@ -63,7 +169,8 @@ impl AgentKind {
         matches!(self, AgentKind::Claude | AgentKind::OpenCode)
     }
 
-    /// All known agents, in picker order.
+    /// The built-in agents, in picker order ([`AgentKind::all`] adds the
+    /// TOML-defined ones).
     pub const ALL: &[AgentKind] = &[
         AgentKind::Claude,
         AgentKind::Codex,
@@ -75,7 +182,13 @@ impl AgentKind {
     /// alive in a pane (either as the pane process or one of its children —
     /// codex installed via npm runs as a `node` wrapper with a `codex` child).
     pub fn process_name(self) -> &'static str {
-        self.id()
+        match self.def() {
+            Some(d) => d.process_name.as_deref().unwrap_or_else(|| {
+                let bin = d.command[0].as_str();
+                bin.rsplit('/').next().unwrap_or(bin)
+            }),
+            None => self.id(),
+        }
     }
 
     /// For agents that can run as a plain node script (comm `node` rather than
@@ -87,14 +200,16 @@ impl AgentKind {
             // Older node-script opencode installs run as `node …/opencode …`,
             // so `comm` is `node` and `pgrep -x opencode` misses them.
             AgentKind::OpenCode => Some(self.id()),
+            // TOML agents are often node scripts (gemini, copilot).
+            AgentKind::Custom(_) => Some(self.process_name()),
             _ => None,
         }
     }
 
     /// Markers for dialogs that need the user's attention (permission prompts
     /// and question selectors), matched against the bottom of the pane.
-    pub fn attention_markers(self) -> &'static [&'static str] {
-        match self {
+    pub fn attention_markers(self) -> Vec<&'static str> {
+        let markers: &[&str] = match self {
             AgentKind::Claude => &[
                 "Do you want to",
                 "Yes, allow all",
@@ -118,7 +233,14 @@ impl AgentKind {
                 "Allow once",
                 "Allow always",
             ],
-        }
+            AgentKind::Custom(_) => {
+                let def = self.def();
+                return def
+                    .map(|d| d.attention_markers.iter().map(String::as_str).collect())
+                    .unwrap_or_default();
+            }
+        };
+        markers.to_vec()
     }
 
     /// Whether `line` is part of the agent's input box / footer chrome, used
@@ -151,6 +273,9 @@ impl AgentKind {
                 line == "❯"
                     || (line.chars().count() >= 10 && line.chars().all(|c| c == '─' || c == '━'))
             }
+            AgentKind::Custom(_) => self
+                .def()
+                .is_some_and(|d| d.prompt_chrome.iter().any(|p| line.starts_with(p.as_str()))),
         }
     }
 
@@ -173,7 +298,7 @@ pub fn parse_agent_id(id: &str) -> anyhow::Result<AgentKind> {
     AgentKind::from_id(id).ok_or_else(|| {
         anyhow::anyhow!(
             "unknown agent '{id}' (expected one of: {})",
-            AGENT_IDS.join(", ")
+            AgentKind::ids().join(", ")
         )
     })
 }
@@ -184,10 +309,53 @@ mod tests {
 
     #[test]
     fn ids_roundtrip() {
-        for id in AGENT_IDS {
-            assert_eq!(AgentKind::from_id(id).unwrap().id(), *id);
+        for id in AgentKind::ids() {
+            assert_eq!(AgentKind::from_id(id).unwrap().id(), id);
         }
         assert!(AgentKind::from_id("gpt").is_none());
+    }
+
+    #[test]
+    fn bundled_agents_load_as_custom_kinds() {
+        let gemini = AgentKind::from_id("gemini").unwrap();
+        assert!(matches!(gemini, AgentKind::Custom(_)));
+        assert_eq!(gemini.label(), "Gemini CLI");
+        assert_eq!(gemini.process_name(), "gemini");
+        assert_eq!(AgentKind::from_id("cursor").unwrap().process_name(), "cursor-agent");
+        for id in ["gemini", "copilot", "cursor", "amp"] {
+            assert!(AgentKind::ids().contains(&id), "{id}");
+        }
+        assert!(!gemini.reports_turn_start());
+        assert!(gemini.attention_markers().contains(&"Allow execution"));
+        assert!(gemini.is_prompt_chrome("│ > type here"));
+    }
+
+    #[test]
+    fn user_agents_override_by_id_and_cannot_shadow_builtins() {
+        let base = parse_defs(include_str!("agents.toml")).unwrap();
+        let n = base.len();
+        let extra = parse_defs(
+            r#"
+            [[agent]]
+            id = "gemini"
+            label = "Gemini (mine)"
+            command = ["gemini"]
+            [[agent]]
+            id = "claude"
+            label = "fake"
+            command = ["x"]
+            [[agent]]
+            id = "aider"
+            label = "Aider"
+            command = ["/usr/bin/aider"]
+            "#,
+        )
+        .unwrap();
+        let merged = merge_defs(merge_defs(Vec::new(), base), extra);
+        assert_eq!(merged.len(), n + 1);
+        assert_eq!(merged.iter().find(|d| d.id == "gemini").unwrap().label, "Gemini (mine)");
+        assert!(merged.iter().all(|d| d.id != "claude"));
+        assert!(parse_defs("[[agent]]\nid = \"x\"\nlabel = \"x\"\ncommand = []\nbogus = 1").is_err());
     }
 
     #[test]

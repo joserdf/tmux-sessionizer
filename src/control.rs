@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::agent::{AGENT_IDS, AgentKind};
+use crate::agent::AgentKind;
 use crate::autoclose::Target as CloseTarget;
 use crate::config::Config;
 use crate::inventory::{self, AgentStatus, Pane, PaneState};
@@ -822,7 +822,7 @@ fn agent_command(agent: Option<&str>, cwd: &str, prompt: Option<&str>) -> Result
     match agent.filter(|a| !a.is_empty()) {
         Some(a) => {
             let kind = AgentKind::from_id(a).with_context(|| {
-                format!("unknown agent {a:?} (one of {})", AGENT_IDS.join(", "))
+                format!("unknown agent {a:?} (one of {})", AgentKind::ids().join(", "))
             })?;
             Ok(Some(crate::tmux::build_agent_command(
                 kind, cwd, None, prompt, false,
