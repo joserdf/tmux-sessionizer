@@ -283,9 +283,16 @@ Plane → GitHub Projects → Jira.
 session within one poll, shows Needs you when the agent asks something, opens a
 PR when the agent finishes, and the cap holds with N Ready cards.
 
+**Status (2026-10-20):** native, Plane, dispatcher (full status mapping,
+auto push + PR, merged → Done + archive), TUI board, web board (status badge,
+output/diff panel), CLI and MCP tools (`list_cards`, `move_card`, `dispatch`)
+are in. The Plane provider passed a live round trip (list, move, comment)
+against a private test project; the end-to-end definition of done still needs
+a live daemon run. GitHub Projects and Jira are not started.
+
 Open questions:
-- Plane URL and version on the LAN (endpoint names changed from `issues` to
-  `work-items` in recent versions).
+- ~~Plane URL and version on the LAN~~ — Plane 1.4.2 serves both `issues/` and
+  `work-items/`; the provider uses `work-items/`.
 - Webhooks need the daemon reachable from the LAN (it binds `127.0.0.1:7878`
   today). Keep polling as the default; add webhooks with a secret as an opt-in.
 - Boards spanning several repos: map card → repo by a label (`repo:<name>`) or
