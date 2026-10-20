@@ -146,3 +146,188 @@ Remaining / deferred:
 - **Tighter idle/finished policy** — already satisfied: hook events apply as a
   one-shot status override on the next tick (zero pane-scrape latency), and the
   3-tick stability + finished guards cover the hook-less cases.
+
+## Roadmap v2 (2026-10)
+
+The agent-workspace work (status, naming, categories, restore, suspend, MCP,
+sessions view) is tracked in `PLAN.md`. This section is what comes after it,
+drawn from a survey of similar tools (see *Landscape* below).
+
+**Guiding constraint:** showrunner lives inside the user's own tmux. Features
+that need an owned multiplexer, a replaceable UI or native Windows are out of
+scope (see *Not planned*).
+
+### Landscape (surveyed 2026-10-19)
+
+| Tool | Stars | Backend | What to learn from it |
+|------|-------|---------|-----------------------|
+| [Herdr](https://github.com/herdrdev/herdr) | 44.8k | own multiplexer | ~24 agents; "add Herdr support" protocol for agent authors; layout snapshots; plugins; mobile PWA (Collie) |
+| [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) | 28.4k | web app | kanban issues → agent workspaces; inline diff comments sent to the agent; PR + merge |
+| [Claude Squad](https://github.com/smtg-ai/claude-squad) | 8.6k | tmux | `-y` auto-accept; pause/checkout |
+| [workmux](https://github.com/raine/workmux) | 2.9k | user's tmux | closest in spirit: status in window names, `merge` cleans up worktree + window + branch, sandbox |
+| [CCManager](https://github.com/kbwo/ccmanager) | 1.3k | own PTY | `.worktreeinclude`; AI-verified auto-approval; devcontainer |
+| [Agent Deck](https://github.com/asheshgoplani/agent-deck) | 1.1k | tmux | message queue; fork + parent link; cost dashboard; Telegram/Slack conductor; MCP/skills manager; Docker sandbox |
+| [thurbox](https://github.com/Thurbeen/thurbox) | 95 | own tmux server | multi-repo sessions; fork + lead/worker tree; agent mailbox; scheduled automations; agents as TOML; Lua UI |
+
+What only showrunner has: a native MCP server with guards (own-pane
+protection, `read_only`), six statuses including question vs permission with the
+pending options, per-session CPU/mem/GPU, and suspend of idle agents.
+
+### Phase 5 — Task board + agent dispatch
+
+A kanban board over a pluggable task source. Cards moved to **Ready** are
+spawned as agent sessions automatically, up to a concurrency cap, and the card
+follows the session through review to done.
+
+**Canonical columns.** Every provider maps its own states onto these:
+
+| Column | Meaning | Set by |
+|--------|---------|--------|
+| Backlog | not for agents yet | human |
+| Ready | eligible for dispatch | human |
+| Running | a session is working on it | dispatcher |
+| Needs you | session is `question`, `permission` or `error` | dispatcher (from session status) |
+| Review | agent finished; PR open | dispatcher |
+| Done | PR merged / card closed | dispatcher or human |
+
+*Needs you* is derived from session status. Providers without a matching
+state show it as a label or as a badge on the card.
+
+**Providers.** Each implements one trait (`src/tasks/`), so the board, the
+dispatcher and the UIs never know which one is behind a board:
+
+```rust
+trait TaskProvider {
+    fn list(&self) -> Result<Vec<Card>>;                  // cards + their column
+    fn move_to(&self, card: &CardId, col: Column) -> Result<()>;
+    fn comment(&self, card: &CardId, body: &str) -> Result<()>;
+    fn link(&self, card: &CardId, kind: Link, url: &str) -> Result<()>; // branch, PR
+}
+// Card { id, key ("SR-42"), title, body, column, labels, priority, url }
+```
+
+| Provider | API | Auth | Notes |
+|----------|-----|------|-------|
+| `native` | `~/.showrunner` | none | extends `Task` with `column` + `body`; built first, defines the trait |
+| `plane` | REST `/api/v1/workspaces/{slug}/projects/{id}/…` (work items, states, comments) | `X-API-Key` | self-hosted on the LAN; check endpoint names against the instance's version |
+| `github` | Projects v2 GraphQL (`updateProjectV2ItemFieldValue` on the Status field) | reuses `gh auth` | items are issues; PR link is native |
+| `jira` | REST v3 `/rest/api/3/search/jql`, `/issue/{key}/transitions` | API token | comments are ADF |
+
+**Config** (`~/.showrunner/config.toml`). One board per block, each bound
+to one showrunner project (repo):
+
+```toml
+[[boards]]
+name = "sessionizer"
+provider = "plane"            # native | plane | github | jira
+project = "tmux-sessionizer"  # showrunner project the cards run in
+agent = "claude"
+max_running = 2               # concurrency cap for this board
+prompt_template = "~/.showrunner/prompts/task.md"
+
+[boards.plane]
+url = "http://plane.lan"
+workspace = "joserdf"
+project_id = "…"
+api_key_env = "PLANE_API_KEY"  # secrets come from env, never the file
+
+[boards.columns]              # provider state -> canonical column
+"Backlog" = "backlog"
+"Ready for agent" = "ready"
+"In Progress" = "running"
+"In Review" = "review"
+"Done" = "done"
+```
+
+**Dispatcher** (daemon loop, poll every 60 s; webhooks later):
+1. Per board, count Running cards whose session is alive. While below
+   `max_running` (and below a global `[dispatch] max_running`), take the next
+   Ready card by provider rank/priority.
+2. Create the task: branch `sr/<key>-<slug>`, a worktree (existing
+   `copy_patterns` / `setup_commands`), and a session with the board's agent.
+   The first message is the prompt template rendered with the card's title,
+   body and URL.
+3. Move the card to Running and comment the branch and session name.
+4. Map session status onto the card: `question`/`permission`/`error` → Needs
+   you; back to `working` → Running.
+5. On `done`: if the branch has commits, push and open the PR (existing ops),
+   link it and move to Review. If not, move to Needs you with the agent's
+   last output as a comment.
+6. On PR merged → Done: archive-and-close the session (existing snapshot path).
+
+Rules:
+- **Idempotent.** The card id is stored on the `SessionRecord`. A card with a
+  live or archived task is never dispatched twice, including after a daemon
+  restart.
+- **Pausable.** `showrunner board pause|resume`, and daemon off (`Alt+a`)
+  stops dispatching.
+- **No silent escalation.** Dispatched agents run in their normal permission
+  mode. A board must opt in explicitly to any bypass flag.
+- `--dry-run` prints what would be dispatched.
+
+**UI (both):**
+- **Web** (`/board` on the daemon): one column per canonical state, drag
+  between columns (calls `move_to`), live session status on each card via the
+  existing SSE, click a card for output and diff, plus a "dispatch now"
+  button.
+- **TUI**: `showrunner board` and a key in the sessions view. Compact columns
+  with counts; `Enter` on a card switches to its session; `m` moves the card.
+- **MCP**: `list_cards(board, column?)`, `move_card`, `dispatch(card)` (lays
+  the groundwork for a lead agent, Phase 6).
+- **CLI**: `showrunner board list|dispatch|pause|resume`.
+
+**Order:** native provider + trait → dispatcher → TUI board → web board →
+Plane → GitHub Projects → Jira.
+
+**Definition of done:** a card moved to Ready in Plane becomes a running
+session within one poll, shows Needs you when the agent asks something, opens a
+PR when the agent finishes, and the cap holds with N Ready cards.
+
+Open questions:
+- Plane URL and version on the LAN (endpoint names changed from `issues` to
+  `work-items` in recent versions).
+- Webhooks need the daemon reachable from the LAN (it binds `127.0.0.1:7878`
+  today). Keep polling as the default; add webhooks with a secret as an opt-in.
+- Boards spanning several repos: map card → repo by a label (`repo:<name>`) or
+  keep one board per showrunner project.
+
+### Phase 6 — Agent control
+
+- **Message queue.** `send_message` to a `working` agent queues instead of
+  refusing, and is delivered on the next `idle`/`done` (built on
+  `wait_for_status`). `force` keeps today's interrupting behaviour. (Agent Deck)
+- **Fork a session** (Claude `--fork-session`, Codex fork) with a parent link on
+  the `SessionRecord`. The sessions view nests children under their parent.
+  (thurbox, Agent Deck)
+- **Orchestration MCP tools:** `spawn_worker(prompt, project?)`,
+  `children(session)` and `collect(session)`, so a lead agent can fan out
+  work and gather results. This shares the spawn path with the Phase 5
+  dispatcher. (thurbox Fleet, Herdr agent-automation)
+
+### Phase 7 — Observability and reach
+
+- **Token cost per session** in the `RES` column and the resource panel, read
+  from the Claude/Codex transcripts that search already parses. (Agent Deck)
+- **Phone notifications** via ntfy or Telegram on `question` / `permission` /
+  board Needs you, sent from the daemon next to the OS notifier. (Agent Deck,
+  Herdr plugin)
+
+### Phase 8 — Agents and review
+
+- **Agents as data**: a TOML file with command, resume command, hook/scrape
+  status strategy and window-name rules, so new agents need no recompile. Add
+  Gemini, Copilot CLI, Cursor Agent and Amp. (thurbox `agents.toml`, Herdr)
+- **Diff comments to the agent**: comment lines during hunk review, then send
+  them to the session as one message. (Vibe Kanban)
+- **`.worktreeinclude`**: also honour a repo-level `.worktreeinclude`
+  (gitignore syntax) in addition to the per-project `copy_patterns`. (CCManager,
+  Agent Deck)
+
+### Not planned
+
+- Own multiplexer / own tmux server (Herdr, thurbox): would give up living in the
+  user's tmux.
+- Replaceable Lua UI and a plugin marketplace (thurbox, Herdr).
+- Native Windows; SSH hosts in one list (revisit if remote agents become a need).
+- AI auto-approval of permission prompts (CCManager): risky. The board's
+  Needs you column plus phone notifications cover the same pain.
