@@ -390,7 +390,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Paste text into a pane and press Enter (e.g. a prompt for its agent). Refuses the caller's own pane, and a working agent unless force"
+        description = "Paste text into a pane and press Enter (e.g. a prompt for its agent). Refuses the caller's own pane; a working agent is queued (delivered when it next becomes idle or done) unless force"
     )]
     async fn send_message(&self, Parameters(p): Parameters<SendMessage>) -> Out {
         self.act(move |inv, _| {

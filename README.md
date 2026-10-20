@@ -184,8 +184,9 @@ Agent statuses come from the daemon. Without the daemon, only which agent runs
 where is known.
 
 The caller's own pane is protected: `send_message`, `send_keys`, `close` and
-`suspend` refuse it. `send_message` also refuses a working agent unless
-`force`, and `close` needs `confirm: true`. Set `[mcp] read_only = true` in
+`suspend` refuse it. `send_message` to a working agent is queued (delivered
+when the agent next becomes idle or done) unless `force` pastes immediately,
+and `close` needs `confirm: true`. Set `[mcp] read_only = true` in
 `~/.showrunner/config.toml` to allow only the reading tools.
 
 ## Configuration

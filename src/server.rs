@@ -79,6 +79,7 @@ pub fn run(bind: &str) -> Result<()> {
         .route("/api/hook-events", get(api_hook_events))
         .route("/api/v2/sessions/{name}/category", post(api_set_category))
         .route("/api/v2/pane-states", get(api_pane_states))
+        .route("/api/v2/queue", get(api_queue_get).post(api_queue_push))
         .with_state(state);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -593,6 +594,50 @@ async fn api_pane_states(State(state): State<Arc<ServerState>>) -> Response {
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     (StatusCode::SERVICE_UNAVAILABLE, "worker has no state yet").into_response()
+}
+
+#[derive(Deserialize)]
+struct QueueBody {
+    /// Pane id (`%12`). Goes in the body, not the path: pane ids contain `%`.
+    pane: String,
+    text: String,
+    #[serde(default = "default_submit")]
+    submit: bool,
+}
+
+/// Queue a message for a working agent; the worker delivers it when the pane
+/// is next idle or done. Local-only, like `POST /api/hook`.
+async fn api_queue_push(
+    State(state): State<Arc<ServerState>>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    axum::Json(body): axum::Json<QueueBody>,
+) -> Result<axum::Json<Value>, ApiError> {
+    if !hook_source_allowed(peer) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "queue is local-only; messages can only be queued from this machine".to_string(),
+        ));
+    }
+    if body.pane.trim().is_empty() {
+        return Err(bad_request("pane is required"));
+    }
+    if body.text.is_empty() {
+        return Err(bad_request("text is required"));
+    }
+    let position = state.worker.queue.lock().unwrap().push(
+        &body.pane,
+        crate::worker::QueuedMsg {
+            text: body.text,
+            submit: body.submit,
+        },
+    );
+    Ok(axum::Json(json!({ "queued": true, "position": position })))
+}
+
+/// Pending queued messages per pane, for inspection.
+async fn api_queue_get(State(state): State<Arc<ServerState>>) -> axum::Json<Value> {
+    let pending = state.worker.queue.lock().unwrap().pending();
+    axum::Json(json!({ "queues": pending }))
 }
 
 #[derive(Deserialize)]

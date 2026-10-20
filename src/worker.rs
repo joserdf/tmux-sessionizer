@@ -27,6 +27,60 @@ pub struct WorkerHints {
     pub project_paths: Vec<(String, String)>,
 }
 
+/// One message queued for a pane, delivered when the agent is next idle/done.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueuedMsg {
+    pub text: String,
+    pub submit: bool,
+}
+
+/// FIFO of pending messages per pane, keyed by pane id. Owned by the daemon's
+/// shared state; the worker delivers one message per idle/done pane per tick.
+#[derive(Debug, Default)]
+pub struct MessageQueue {
+    queues: HashMap<String, VecDeque<QueuedMsg>>,
+}
+
+impl MessageQueue {
+    /// Append a message to a pane's queue and return its 1-based position.
+    pub fn push(&mut self, pane: &str, msg: QueuedMsg) -> usize {
+        let queue = self.queues.entry(pane.to_string()).or_default();
+        queue.push_back(msg);
+        queue.len()
+    }
+
+    /// Every queued message per pane, oldest first, for `GET /api/v2/queue`.
+    pub fn pending(&self) -> HashMap<String, Vec<QueuedMsg>> {
+        self.queues
+            .iter()
+            .map(|(p, q)| (p.clone(), q.iter().cloned().collect()))
+            .collect()
+    }
+}
+
+/// Pop ONE message per pane that is `idle` or `done` (never `question`,
+/// `permission` or `error` — the text would answer a prompt), and drop queues
+/// for panes that no longer exist. Returns one `(pane, message)` per eligible
+/// pane.
+fn take_deliverable(
+    queue: &mut MessageQueue,
+    panes: &HashSet<String>,
+    statuses: &HashMap<String, AgentStatus>,
+) -> Vec<(String, QueuedMsg)> {
+    queue.queues.retain(|pane, _| panes.contains(pane));
+    let mut deliver = Vec::new();
+    for (pane, q) in queue.queues.iter_mut() {
+        if matches!(
+            statuses.get(pane),
+            Some(AgentStatus::Idle | AgentStatus::Done)
+        ) && let Some(msg) = q.pop_front()
+        {
+            deliver.push((pane.clone(), msg));
+        }
+    }
+    deliver
+}
+
 /// Data produced by the background worker for the UI to consume.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkerUpdate {
@@ -75,6 +129,9 @@ pub struct Worker {
     /// zero pane-scrape latency. (cwd, not the agent's session_id, is the
     /// correlation key: it maps back to a tmux session via the records.)
     pub hook_inbox: Arc<Mutex<VecDeque<HookDelivery>>>,
+    /// Messages queued for working agents, delivered by the worker when a pane
+    /// is next idle/done. Filled by `POST /api/v2/queue` and drained here.
+    pub queue: Arc<Mutex<MessageQueue>>,
     /// Live connection to the daemon (remote mode). True while the SSE stream
     /// is actively delivering; false when it has dropped. In local mode this is
     /// always true (the worker IS the source). The UI shows a "daemon
@@ -93,6 +150,7 @@ impl Worker {
         }));
         let latest = Arc::new(Mutex::new(None));
         let hook_inbox = Arc::new(Mutex::new(VecDeque::new()));
+        let queue = Arc::new(Mutex::new(MessageQueue::default()));
         // Local mode: the worker is its own source, so it's always "connected"
         // and never remote (no daemon banner).
         let connected = Arc::new(AtomicBool::new(true));
@@ -103,6 +161,7 @@ impl Worker {
         let hints_clone = hints.clone();
         let latest_clone = latest.clone();
         let inbox_clone = hook_inbox.clone();
+        let queue_clone = queue.clone();
         let connected_clone = connected.clone();
         let last_frame_clone = last_frame.clone();
         thread::spawn(move || {
@@ -110,6 +169,7 @@ impl Worker {
                 hints_clone,
                 latest_clone,
                 inbox_clone,
+                queue_clone,
                 false,
                 connected_clone,
                 last_frame_clone,
@@ -120,6 +180,7 @@ impl Worker {
             hints,
             latest,
             hook_inbox,
+            queue,
             connected,
             remote: false,
         }
@@ -165,9 +226,10 @@ impl Worker {
             project_paths: Vec::new(),
         }));
         let latest = Arc::new(Mutex::new(None));
-        // Unused in remote mode (the daemon's worker owns the hook inbox); kept
-        // for a uniform Worker shape.
+        // Unused in remote mode (the daemon's worker owns the hook inbox and the
+        // message queue); kept for a uniform Worker shape.
         let hook_inbox = Arc::new(Mutex::new(VecDeque::new()));
+        let queue = Arc::new(Mutex::new(MessageQueue::default()));
         // Starts TRUE: connect_remote is only called after daemon_reachable()
         // succeeded, so the daemon is up and the SSE client is about to open the
         // stream. The client flips it false on the first failed/dropped connect
@@ -199,12 +261,14 @@ impl Worker {
         let connected_fb = connected.clone();
         let hints_fb = hints.clone();
         let inbox_fb = hook_inbox.clone();
+        let queue_fb = queue.clone();
         let last_frame_fb = last_frame.clone();
         thread::spawn(move || {
             worker_loop(
                 hints_fb,
                 latest_fb,
                 inbox_fb,
+                queue_fb,
                 true,
                 connected_fb,
                 last_frame_fb,
@@ -215,6 +279,7 @@ impl Worker {
             hints,
             latest,
             hook_inbox,
+            queue,
             connected,
             remote: true,
         }
@@ -343,6 +408,7 @@ fn worker_loop(
     hints: Arc<Mutex<WorkerHints>>,
     latest: Arc<Mutex<Option<WorkerUpdate>>>,
     hook_inbox: Arc<Mutex<VecDeque<HookDelivery>>>,
+    queue: Arc<Mutex<MessageQueue>>,
     fallback: bool,
     connected: Arc<AtomicBool>,
     last_frame: Arc<Mutex<Instant>>,
@@ -540,6 +606,24 @@ fn worker_loop(
         for (pane, status) in inventory::update_statuses(&mut pane_states, &panes, now) {
             notify_pane_status(pane, status);
         }
+        // Deliver queued messages to agents that are now idle or done — one per
+        // pane per tick, so the agent becomes working again and the next message
+        // waits for the next idle. The daemon owns the queue; a fallback prober
+        // must not deliver.
+        if !fallback {
+            let deliver = {
+                let mut q = queue.lock().unwrap();
+                let alive: HashSet<String> = panes.iter().map(|p| p.id.clone()).collect();
+                let statuses: HashMap<String, AgentStatus> = pane_states
+                    .iter()
+                    .filter_map(|(id, st)| st.status.map(|s| (id.clone(), s)))
+                    .collect();
+                take_deliverable(&mut q, &alive, &statuses)
+            };
+            for (pane, msg) in deliver {
+                let _ = tmux::paste_text(&pane, &msg.text, msg.submit);
+            }
+        }
         inventory::apply_window_options(&mut published_windows, &panes, &pane_states, now);
         crate::naming::apply_names(&panes, &pane_states, &naming, &hostname);
         snapshots.tick(&panes, &mut pane_states, &restore.redact, now);
@@ -719,7 +803,6 @@ fn get_current_branch(project_path: &str) -> Option<String> {
         None
     }
 }
-
 
 
 /// Advance a session's finished-stability counter and report its status. A
@@ -940,5 +1023,94 @@ mod sse_client_tests {
         assert_eq!(find_frame_end(b"data: x"), None);
         assert_eq!(find_frame_end(b"data: x\n\n"), Some(9));
         assert_eq!(find_frame_end(b"data: a\n\ndata: b"), Some(9));
+    }
+}
+
+#[cfg(test)]
+mod message_queue_tests {
+    use super::*;
+    use crate::inventory::AgentStatus;
+
+    fn msg(text: &str) -> QueuedMsg {
+        QueuedMsg {
+            text: text.to_string(),
+            submit: true,
+        }
+    }
+
+    #[test]
+    fn push_returns_increasing_positions() {
+        let mut q = MessageQueue::default();
+        assert_eq!(q.push("%1", msg("a")), 1);
+        assert_eq!(q.push("%1", msg("b")), 2);
+        assert_eq!(q.push("%2", msg("c")), 1);
+        assert_eq!(q.pending()["%1"].len(), 2);
+    }
+
+    #[test]
+    fn delivers_one_message_per_idle_done_pane() {
+        let mut q = MessageQueue::default();
+        q.push("%1", msg("a"));
+        q.push("%1", msg("b"));
+        q.push("%2", msg("c"));
+        let panes: HashSet<String> = ["%1", "%2", "%3"].into_iter().map(String::from).collect();
+        let statuses = HashMap::from([
+            ("%1".to_string(), AgentStatus::Done),
+            ("%2".to_string(), AgentStatus::Idle),
+            ("%3".to_string(), AgentStatus::Idle),
+        ]);
+        let deliver = take_deliverable(&mut q, &panes, &statuses);
+        // One per pane, FIFO order within a pane.
+        let mut by_pane: HashMap<String, Vec<String>> = HashMap::new();
+        for (pane, m) in &deliver {
+            by_pane
+                .entry(pane.clone())
+                .or_default()
+                .push(m.text.clone());
+        }
+        assert_eq!(by_pane["%1"], vec!["a".to_string()]);
+        assert_eq!(by_pane["%2"], vec!["c".to_string()]);
+        assert!(!by_pane.contains_key("%3"));
+        // The second message for %1 stays queued for the next idle tick.
+        assert_eq!(q.pending()["%1"].len(), 1);
+        assert_eq!(q.pending()["%1"][0].text, "b");
+    }
+
+    #[test]
+    fn never_delivers_on_question_permission_error_or_working() {
+        let mut q = MessageQueue::default();
+        for pane in ["%1", "%2", "%3", "%4"] {
+            q.push(pane, msg("x"));
+        }
+        let panes: HashSet<String> = ["%1", "%2", "%3", "%4"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let statuses = HashMap::from([
+            ("%1".to_string(), AgentStatus::Question),
+            ("%2".to_string(), AgentStatus::Permission),
+            ("%3".to_string(), AgentStatus::Error),
+            ("%4".to_string(), AgentStatus::Working),
+        ]);
+        assert!(take_deliverable(&mut q, &panes, &statuses).is_empty());
+        assert_eq!(q.pending().len(), 4);
+    }
+
+    #[test]
+    fn drops_queue_for_vanished_panes() {
+        let mut q = MessageQueue::default();
+        q.push("%1", msg("a"));
+        q.push("%2", msg("b"));
+        q.push("%2", msg("c"));
+        // %2 still exists but is idle; %3 is new with no queue.
+        let panes: HashSet<String> = ["%2", "%3"].into_iter().map(String::from).collect();
+        let statuses = HashMap::from([("%2".to_string(), AgentStatus::Idle)]);
+        let deliver = take_deliverable(&mut q, &panes, &statuses);
+        assert_eq!(deliver.len(), 1);
+        assert_eq!(deliver[0].0, "%2");
+        // %1's queue was dropped (pane vanished), %2 has one message left.
+        assert_eq!(q.pending().len(), 1);
+        assert_eq!(q.pending()["%2"].len(), 1);
+        assert_eq!(q.pending()["%2"][0].text, "c");
     }
 }

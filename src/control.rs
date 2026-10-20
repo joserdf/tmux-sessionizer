@@ -34,6 +34,53 @@ pub fn own_pane() -> Option<String> {
     std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())
 }
 
+/// The daemon's message-queue endpoint; the daemon owns the queue.
+fn daemon_queue_url() -> String {
+    let port = std::env::var("SESSIONIZER_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(7878);
+    format!("http://127.0.0.1:{port}/api/v2/queue")
+}
+
+/// Queue a message for a working agent with the daemon and return its position
+/// in the pane's FIFO. The daemon delivers it when the agent is next idle or
+/// done. `send_message` runs on a blocking thread, so this spins up a short
+/// current-thread runtime for the POST.
+fn queue_message(pane: &str, text: &str, submit: bool) -> Result<usize> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("no runtime to reach the daemon queue")?;
+    let url = daemon_queue_url();
+    let pane = pane.to_string();
+    let text = text.to_string();
+    rt.block_on(async move {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .context("could not build the daemon client")?;
+        let body = json!({ "pane": pane, "text": text, "submit": submit }).to_string();
+        let resp = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .context("daemon unreachable")?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("daemon refused the queue request ({status})");
+        }
+        let body = resp.text().await.context("daemon response unreadable")?;
+        serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v["position"].as_u64())
+            .map(|p| p as usize)
+            .ok_or_else(|| anyhow::anyhow!("daemon response missing position"))
+    })
+}
+
 /// What a target names: `close` and `rename` act on sessions or windows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scope {
@@ -352,7 +399,15 @@ impl Inventory {
         let t = self.resolve(target)?;
         refuse_own(t.pane)?;
         if !force && self.status(t.pane) == Some(AgentStatus::Working) {
-            bail!("{target} is working; wait_for_status first or pass force=true");
+            // The daemon owns the queue and delivers when the agent is next idle
+            // or done, so the caller doesn't have to poll.
+            let position = queue_message(&t.pane.id, text, submit).with_context(|| {
+                format!(
+                    "{target} is working; queueing needs the daemon — \
+                     wait_for_status first or pass force=true"
+                )
+            })?;
+            return Ok(json!({"queued": true, "pane": t.pane.id, "position": position}));
         }
         crate::tmux::paste_text(&t.pane.id, text, submit)?;
         Ok(json!({"sent_to": t.pane.id, "submitted": submit}))
