@@ -355,15 +355,22 @@ pub fn create_session(
         }
 
         // Always copy .claude/ folder, plus any configured patterns and the
-        // repo-level .worktreeinclude (sync, before hooks setup)
+        // repo-level .worktreeinclude (sync, before hooks setup). A repo that
+        // has a .worktreeinclude file opts into walking subdirectories (so
+        // nested and glob patterns are reachable); otherwise keep the original
+        // flat copy, which does not traverse into nested folders.
         let mut all_patterns = vec![".claude/***".to_string()];
         all_patterns.extend_from_slice(copy_patterns);
-        for pattern in read_worktreeinclude(Path::new(project_path)) {
-            if !all_patterns.contains(&pattern) {
-                all_patterns.push(pattern);
+        let wtinclude = read_worktreeinclude(Path::new(project_path));
+        let recursive = !wtinclude.is_empty();
+        if recursive {
+            for pattern in wtinclude {
+                if !all_patterns.contains(&pattern) {
+                    all_patterns.push(pattern);
+                }
             }
         }
-        copy_patterns_to_worktree(project_path, &worktree_path_str, &all_patterns);
+        copy_patterns_to_worktree(project_path, &worktree_path_str, &all_patterns, recursive);
 
         // Run setup commands in the new worktree if configured
         for cmd in setup_commands {
@@ -1485,10 +1492,26 @@ fn normalize_pattern(pattern: &str) -> String {
 /// Patterns are passed through unchanged: `.worktreeinclude` patterns arrive
 /// already normalized (e.g. `build/` -> `build/***`) by `read_worktreeinclude`,
 /// while `copy_patterns` keep their pre-existing form.
-fn build_rsync_filter_args(patterns: &[String]) -> Vec<String> {
-    let mut args = vec!["-a".to_string(), "-m".to_string()];
-    args.push("--exclude".to_string());
-    args.push(".git".to_string());
+/// Build the rsync filter args for a worktree copy.
+///
+/// `recursive` is true when a repo has a `.worktreeinclude` file: patterns may
+/// then be nested paths or globs, so rsync walks every directory (`--include
+/// '*/'`) to reach them, and `-m` prunes dirs left empty. When false (no
+/// `.worktreeinclude`), the original flat copy is used: only the listed
+/// patterns are matched, nothing nested is traversed. Patterns are passed
+/// through unchanged; `.worktreeinclude` patterns arrive already normalized
+/// (e.g. `build/` -> `build/***`) by [`read_worktreeinclude`], while
+/// `copy_patterns` keep their pre-existing form.
+fn build_rsync_filter_args(patterns: &[String], recursive: bool) -> Vec<String> {
+    let mut args = if recursive {
+        vec!["-a".to_string(), "-m".to_string()]
+    } else {
+        vec!["-a".to_string()]
+    };
+    if recursive {
+        args.push("--exclude".to_string());
+        args.push(".git".to_string());
+    }
     for pattern in patterns {
         if let Some(negated) = pattern.strip_prefix('!') {
             args.push("--exclude".to_string());
@@ -1501,18 +1524,27 @@ fn build_rsync_filter_args(patterns: &[String]) -> Vec<String> {
             args.push(pattern.to_string());
         }
     }
-    // Traverse every directory so nested patterns can be reached; `-m` prunes
-    // any that end up with no copied files.
-    args.push("--include".to_string());
-    args.push("*/".to_string());
+    if recursive {
+        // Traverse every directory so nested patterns can be reached; `-m`
+        // prunes any that end up with no copied files.
+        args.push("--include".to_string());
+        args.push("*/".to_string());
+    }
     args.push("--exclude".to_string());
     args.push("*".to_string());
     args
 }
 
 /// Copy specific file patterns from the project into a new worktree.
-/// Patterns can be files (`.env`) or directories (`build/`).
-fn copy_patterns_to_worktree(project_path: &str, worktree_path: &str, patterns: &[String]) {
+/// Patterns can be files (`.env`) or directories (`build/`). `recursive` is
+/// true when a repo has a `.worktreeinclude` file (nested/glob patterns);
+/// otherwise the original flat copy is used.
+fn copy_patterns_to_worktree(
+    project_path: &str,
+    worktree_path: &str,
+    patterns: &[String],
+    recursive: bool,
+) {
     let src = if project_path.ends_with('/') {
         project_path.to_string()
     } else {
@@ -1525,7 +1557,7 @@ fn copy_patterns_to_worktree(project_path: &str, worktree_path: &str, patterns: 
         format!("{worktree_path}/")
     };
 
-    let mut args = build_rsync_filter_args(patterns);
+    let mut args = build_rsync_filter_args(patterns, recursive);
     args.push(src);
     args.push(dst);
 
@@ -3300,6 +3332,10 @@ Some transcript output.\n\
     /// Copy `files` into a throwaway src dir, run the rsync copy with `patterns`,
     /// and return the relative paths (dirs with a trailing `/`) present in dst.
     fn copied_with(patterns: &[String], files: &[&str]) -> Vec<String> {
+        copied_with_recursive(patterns, files, true)
+    }
+
+    fn copied_with_recursive(patterns: &[String], files: &[&str], recursive: bool) -> Vec<String> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("sr_wtinclude_{}_{}", std::process::id(), id));
@@ -3311,7 +3347,12 @@ Some transcript output.\n\
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "x").unwrap();
         }
-        copy_patterns_to_worktree(&src.to_string_lossy(), &dst.to_string_lossy(), patterns);
+        copy_patterns_to_worktree(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            patterns,
+            recursive,
+        );
 
         fn collect(root: &Path, dir: &Path, out: &mut Vec<String>) {
             if !dir.exists() {
@@ -3421,12 +3462,15 @@ Some transcript output.\n\
 
     #[test]
     fn build_rsync_filter_args_orders_negations_before_includes() {
-        let args = build_rsync_filter_args(&[
-            "*.pem".into(),
-            "!certs/keep.pem".into(),
-            ".env".into(),
-            "build/".into(),
-        ]);
+        let args = build_rsync_filter_args(
+            &[
+                "*.pem".into(),
+                "!certs/keep.pem".into(),
+                ".env".into(),
+                "build/".into(),
+            ],
+            true,
+        );
         assert_eq!(
             args,
             vec![
@@ -3454,7 +3498,7 @@ Some transcript output.\n\
     fn build_rsync_filter_args_passes_copy_patterns_unchanged() {
         // copy_patterns (incl. a dir pattern) are passed to rsync verbatim;
         // only .worktreeinclude patterns are normalized (in read_worktreeinclude).
-        let args = build_rsync_filter_args(&["build/".into(), ".env".into()]);
+        let args = build_rsync_filter_args(&["build/".into(), ".env".into()], true);
         assert_eq!(
             args,
             vec![
@@ -3472,5 +3516,32 @@ Some transcript output.\n\
                 "*",
             ]
         );
+    }
+
+    #[test]
+    fn build_rsync_filter_args_without_recursive_is_flat() {
+        // No .worktreeinclude: no -m, no --exclude .git, no --include '*/' —
+        // the original flat copy, so nested folders are not traversed.
+        let args = build_rsync_filter_args(&["build/".into(), ".env".into()], false);
+        assert_eq!(
+            args,
+            vec![
+                "-a",
+                "--include",
+                "build/",
+                "--include",
+                ".env",
+                "--exclude",
+                "*",
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_patterns_without_recursive_stays_flat() {
+        // A top-level pattern copies fine; a nested file is NOT reached (no
+        // folder walk), matching the pre-.worktreeinclude behavior.
+        let copied = copied_with_recursive(&[".env".into()], &[".env", "config/local.env"], false);
+        assert_eq!(copied, vec![".env"]);
     }
 }
