@@ -163,7 +163,7 @@ fn read_tail(path: &Path) -> Option<String> {
     })
 }
 
-fn claude_transcript(home: &Path, id: &str) -> Option<PathBuf> {
+pub(crate) fn claude_transcript(home: &Path, id: &str) -> Option<PathBuf> {
     std::fs::read_dir(home.join(".claude/projects"))
         .ok()?
         .flatten()
@@ -171,7 +171,7 @@ fn claude_transcript(home: &Path, id: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn codex_transcript(dir: &Path, id: &str) -> Option<PathBuf> {
+pub(crate) fn codex_transcript(dir: &Path, id: &str) -> Option<PathBuf> {
     let suffix = format!("-{id}.jsonl");
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();

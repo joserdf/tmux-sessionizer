@@ -310,7 +310,7 @@ impl Server {
         annotations(read_only_hint = true)
     )]
     async fn get_status(&self, Parameters(p): Parameters<TargetArg>) -> Out {
-        with_inventory(move |inv, _| inv.get_status(&p.target, control::now())).await
+        with_inventory(move |inv, cfg| inv.get_status(&p.target, control::now(), cfg)).await
     }
 
     #[tool(
@@ -334,7 +334,8 @@ impl Server {
         loop {
             let target = p.target.clone();
             let status =
-                with_inventory(move |inv, _| inv.get_status(&target, control::now())).await?;
+                with_inventory(move |inv, cfg| inv.get_status(&target, control::now(), cfg))
+                    .await?;
             let v: Value = serde_json::from_str(&status).unwrap_or_default();
             let reached = v["status"]
                 .as_str()

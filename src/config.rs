@@ -567,6 +567,26 @@ pub struct Config {
     /// Task boards (kanban columns dispatched to agent sessions). Tables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boards: Vec<crate::tasks::BoardConfig>,
+    /// Token prices (USD per million tokens) per model id, e.g.
+    /// `[pricing."claude-opus-5-5"]`. Costing is opt-in: sessions whose model
+    /// has no price report no `cost_usd`. A table.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub pricing: HashMap<String, Pricing>,
+}
+
+/// USD-per-million-token prices for one model, as shown in `sessions` and
+/// `get_status`. Prices are user-supplied because they change and we must not
+/// invent them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Pricing {
+    /// Prompt tokens not served from cache.
+    pub input: f64,
+    /// Completion tokens generated.
+    pub output: f64,
+    /// Prompt tokens written to cache.
+    pub cache_write: f64,
+    /// Prompt tokens read from cache.
+    pub cache_read: f64,
 }
 
 /// Root directory for all showrunner data: ~/.showrunner

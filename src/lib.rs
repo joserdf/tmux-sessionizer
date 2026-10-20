@@ -25,6 +25,7 @@ pub mod tasks;
 pub mod theme;
 pub mod tmux;
 pub mod ui;
+pub mod usage;
 pub mod worker;
 
 pub use entry::run;

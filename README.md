@@ -142,6 +142,10 @@ When the terminal is wider than 140 columns, the selected window's output is
 shown on the right. The actions are the MCP tools' (below), so the same rules
 apply.
 
+Agent token usage is read from the transcript (Claude, Codex) and shown per
+window as a compact count (`1.2M tok`), with a dollar cost when the model is
+priced (below). `get_status` reports it as `tokens` and `cost_usd`.
+
 ## MCP server
 
 `showrunner mcp` is an MCP server on stdio. It lets a coding agent see and
@@ -215,6 +219,23 @@ max_running = 2   # per-board cap
 # [boards.jira]       url / project_key / email_env / api_token_env
 # [boards.columns]    provider state name -> canonical column
 ```
+
+### Token usage & pricing
+
+Each session's token usage is parsed from its transcript (Claude and Codex;
+OpenCode and Pi aren't supported yet) and shown in `showrunner sessions` and
+`get_status`. Costing is opt-in: showrunner never guesses prices. Add a price
+per model (USD per million tokens) to `~/.showrunner/config.toml`:
+
+```toml
+[pricing."claude-opus-5-5"]
+input = 15.0
+output = 75.0
+cache_write = 18.75
+cache_read = 1.5
+```
+
+Sessions whose model has no price show only the token count, with no cost.
 
 ## License
 

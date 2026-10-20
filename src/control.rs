@@ -94,6 +94,12 @@ impl Inventory {
             .max()
     }
 
+    /// The main agent pane's token usage, when its transcript is readable.
+    fn window_token_usage(&self, pane: &Pane) -> Option<crate::usage::TokenUsage> {
+        let kind = AgentKind::from_id(self.state(pane)?.agent.as_deref()?)?;
+        crate::usage::token_usage(kind, self.state(pane)?.agent_session_id.as_deref()?)
+    }
+
     fn window_panes<'a>(&'a self, window_id: &'a str) -> impl Iterator<Item = &'a Pane> {
         self.panes.iter().filter(move |p| p.window_id == window_id)
     }
@@ -292,10 +298,13 @@ impl Inventory {
         }
     }
 
-    pub fn get_status(&self, target: &str, now: u64) -> Result<Value> {
+    pub fn get_status(&self, target: &str, now: u64, cfg: &Config) -> Result<Value> {
         let t = self.resolve(target)?;
         let p = t.pane;
         let mut v = self.window_json(p, now);
+        if let Some(usage) = self.window_token_usage(p) {
+            add_tokens(&mut v, &usage, &cfg.pricing);
+        }
         if let Some(branch) = git(&p.cwd, &["rev-parse", "--abbrev-ref", "HEAD"]) {
             v["branch"] = json!(branch.trim());
         }
@@ -715,6 +724,25 @@ fn strip_nulls(mut v: Value) -> Value {
         m.retain(|_, x| !x.is_null());
     }
     v
+}
+
+/// Add a window's `tokens` object and `cost_usd` (when the model is priced) to
+/// its status JSON.
+fn add_tokens(
+    v: &mut Value,
+    usage: &crate::usage::TokenUsage,
+    pricing: &HashMap<String, crate::config::Pricing>,
+) {
+    v["tokens"] = json!({
+        "input": usage.input,
+        "output": usage.output,
+        "cache_write": usage.cache_write,
+        "cache_read": usage.cache_read,
+        "total": usage.total(),
+    });
+    if let Some(c) = crate::usage::cost(usage, pricing) {
+        v["cost_usd"] = json!(c);
+    }
 }
 
 fn check_session_name(name: &str) -> Result<()> {

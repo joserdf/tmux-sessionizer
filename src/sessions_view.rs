@@ -4,6 +4,7 @@
 //! agent states are re-read once a second on a background thread, so the
 //! first frame never waits on tmux or the daemon.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -18,9 +19,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use serde_json::Value;
 
-use crate::config::Config;
+use crate::agent::AgentKind;
+use crate::config::{Config, Pricing};
 use crate::control::{self, Inventory};
-use crate::inventory::AgentStatus;
+use crate::inventory::{AgentStatus, Pane};
 use crate::snapshot::{self, ClosedEntry};
 
 /// Width from which the selected window's output is shown on the right.
@@ -34,6 +36,7 @@ pub fn run() -> Result<()> {
     thread::spawn(move || refresher(refresh_tx, woken));
 
     let mut view = View::new(tx, wake);
+    view.pricing = Config::load().map(|c| c.pricing).unwrap_or_default();
     let mut terminal = ratatui::init();
     let result = view.event_loop(&mut terminal, &rx);
     ratatui::restore();
@@ -83,6 +86,10 @@ struct WinRow {
     agent: Option<String>,
     status: Option<AgentStatus>,
     idle: u64,
+    /// Compact token count (e.g. "1.2M"), empty when the transcript is unreadable.
+    tokens: String,
+    /// Dollar cost (e.g. "$3.40") when the model is priced.
+    cost: Option<String>,
 }
 
 impl WinRow {
@@ -130,7 +137,13 @@ fn needs_attention(status: Option<AgentStatus>) -> bool {
 /// uncategorized sessions; sessions and windows in tmux order. `filter`
 /// keeps windows whose session, name, category, agent or cwd contains it;
 /// `attention` keeps only windows that need the user.
-fn build_rows(inv: &Inventory, now: u64, filter: &str, attention: bool) -> Vec<Row> {
+fn build_rows(
+    inv: &Inventory,
+    now: u64,
+    filter: &str,
+    attention: bool,
+    pricing: &HashMap<String, Pricing>,
+) -> Vec<Row> {
     let needle = filter.trim().to_lowercase();
     let windows = inv.windows();
     let mut sessions: Vec<&str> = Vec::new();
@@ -156,15 +169,20 @@ fn build_rows(inv: &Inventory, now: u64, filter: &str, attention: bool) -> Vec<R
             let kept: Vec<WinRow> = windows
                 .iter()
                 .filter(|p| p.session == session)
-                .map(|p| WinRow {
-                    session: p.session.clone(),
-                    window_id: p.window_id.clone(),
-                    index: p.window_index,
-                    pane: p.id.clone(),
-                    name: p.window_name.clone(),
-                    agent: inv.state(p).and_then(|s| s.agent.clone()),
-                    status: inv.window_status(&p.window_id),
-                    idle: now.saturating_sub(p.activity),
+                .map(|p| {
+                    let (tokens, cost) = usage_readout(inv, p, pricing);
+                    WinRow {
+                        session: p.session.clone(),
+                        window_id: p.window_id.clone(),
+                        index: p.window_index,
+                        pane: p.id.clone(),
+                        name: p.window_name.clone(),
+                        agent: inv.state(p).and_then(|s| s.agent.clone()),
+                        status: inv.window_status(&p.window_id),
+                        idle: now.saturating_sub(p.activity),
+                        tokens,
+                        cost,
+                    }
                 })
                 .filter(|w| !attention || needs_attention(w.status))
                 .filter(|w| {
@@ -243,6 +261,29 @@ fn status_span(status: Option<AgentStatus>) -> Span<'static> {
     )
 }
 
+/// The window's token readout and, when its model is priced, its dollar cost.
+/// Both empty when the transcript is unreadable (or the agent isn't supported).
+fn usage_readout(
+    inv: &Inventory,
+    p: &Pane,
+    pricing: &HashMap<String, Pricing>,
+) -> (String, Option<String>) {
+    let (Some(kind), Some(id)) = (
+        inv.state(p)
+            .and_then(|s| s.agent.as_deref())
+            .and_then(AgentKind::from_id),
+        inv.state(p).and_then(|s| s.agent_session_id.as_deref()),
+    ) else {
+        return (String::new(), None);
+    };
+    let Some(usage) = crate::usage::token_usage(kind, id) else {
+        return (String::new(), None);
+    };
+    let tokens = crate::usage::human(usage.total());
+    let cost = crate::usage::cost(&usage, pricing).map(|c| format!("${:.2}", c));
+    (tokens, cost)
+}
+
 /// Columns of the status cell: glyph, space, the longest code, a gap.
 const STATUS_W: usize = 14;
 
@@ -305,6 +346,8 @@ struct View {
     goto: Option<(String, u32)>,
     projects: bool,
     quit: bool,
+    /// Token prices (USD per million tokens) per model, for the cost readout.
+    pricing: HashMap<String, Pricing>,
 }
 
 impl View {
@@ -324,6 +367,7 @@ impl View {
             goto: None,
             projects: false,
             quit: false,
+            pricing: HashMap::new(),
         }
     }
 
@@ -369,7 +413,13 @@ impl View {
     fn rebuild(&mut self) {
         let Some(inv) = &self.inv else { return };
         let key = self.rows.get(self.sel).and_then(Row::key);
-        self.rows = build_rows(inv, control::now(), &self.filter, self.attention);
+        self.rows = build_rows(
+            inv,
+            control::now(),
+            &self.filter,
+            self.attention,
+            &self.pricing,
+        );
         self.sel = key
             .and_then(|k| self.rows.iter().position(|r| r.key().as_ref() == Some(&k)))
             .unwrap_or(self.sel.min(self.rows.len().saturating_sub(1)));
@@ -768,13 +818,23 @@ impl View {
                 }
                 Row::Window(w) => {
                     let name: String = w.name.chars().take(name_w).collect();
-                    ListItem::new(Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(format!("    {:>2} ", w.index), dim),
                         Span::raw(format!("{name:<name_w$}  ")),
                         Span::styled(format!("{:<9}", w.agent.as_deref().unwrap_or("-")), dim),
                         status_span(w.status),
                         Span::styled(format!("{:>4}", ago(w.idle)), dim),
-                    ]))
+                    ];
+                    if !w.tokens.is_empty() {
+                        spans.push(Span::styled(format!("  {:>6} tok", w.tokens), dim));
+                        if let Some(cost) = &w.cost {
+                            spans.push(Span::styled(
+                                format!(" {cost}"),
+                                Style::default().fg(Color::Cyan),
+                            ));
+                        }
+                    }
+                    ListItem::new(Line::from(spans))
                 }
             })
             .collect();
@@ -831,6 +891,10 @@ mod tests {
         Inventory::new(panes, Some(states))
     }
 
+    fn no_prices() -> HashMap<String, Pricing> {
+        HashMap::new()
+    }
+
     fn labels(rows: &[Row]) -> Vec<String> {
         rows.iter()
             .map(|r| match r {
@@ -843,7 +907,7 @@ mod tests {
 
     #[test]
     fn rows_group_by_category_uncategorized_last() {
-        let rows = build_rows(&inv(), 1000, "", false);
+        let rows = build_rows(&inv(), 1000, "", false, &no_prices());
         assert_eq!(
             labels(&rows),
             [
@@ -868,17 +932,23 @@ mod tests {
     fn filter_and_attention_narrow_rows() {
         let inv = inv();
         assert_eq!(
-            labels(&build_rows(&inv, 1000, "SLIDE", false)),
+            labels(&build_rows(&inv, 1000, "SLIDE", false, &no_prices())),
             ["# projects", "s gates", "w gates:1"]
         );
         // The category and the cwd match too.
-        assert_eq!(build_rows(&inv, 1000, "study", false).len(), 3);
-        assert_eq!(build_rows(&inv, 1000, "/tmp/main", false).len(), 3);
         assert_eq!(
-            labels(&build_rows(&inv, 1000, "", true)),
+            build_rows(&inv, 1000, "study", false, &no_prices()).len(),
+            3
+        );
+        assert_eq!(
+            build_rows(&inv, 1000, "/tmp/main", false, &no_prices()).len(),
+            3
+        );
+        assert_eq!(
+            labels(&build_rows(&inv, 1000, "", true, &no_prices())),
             ["# projects", "s gates", "w gates:0"]
         );
-        assert!(build_rows(&inv, 1000, "nothing", false).is_empty());
+        assert!(build_rows(&inv, 1000, "nothing", false, &no_prices()).is_empty());
     }
 
     #[test]
