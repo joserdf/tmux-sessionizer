@@ -215,6 +215,8 @@ impl AgentKind {
                 "Yes, allow all",
                 "No, and tell Claude what to do differently",
                 "❯ 1.",
+                // Folder-trust dialog (unnumbered); hooks aren't loaded yet.
+                "Yes, I trust this folder",
             ],
             // Codex renders selectors (trust dialog etc.) as `› 1.`; with the
             // yolo flag there are no per-command approvals.

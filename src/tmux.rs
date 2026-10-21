@@ -3146,6 +3146,19 @@ mod tests {
     }
 
     #[test]
+    fn attention_for_claude_trust_dialog() {
+        // Claude's folder-trust dialog runs before hooks load, so this marker
+        // is the only signal that a fresh session in an untrusted repo waits.
+        let pane = " Accessing workspace:\n\n \
+                    /home/u/.showrunner/worktrees/repo/TASK-1-main\n\n \
+                    Quick safety check: Is this a project you created or one you trust?\n\n \
+                    ❯ No, exit\n   \
+                    Yes, I trust this folder\n\n \
+                    Enter to confirm · Esc to cancel";
+        assert!(detect_attention_dialog(pane, AgentKind::Claude));
+    }
+
+    #[test]
     fn no_attention_when_idle_at_input_prompt() {
         // Dialog-like text echoed in the transcript above an idle input box
         // (bare ❯ line) must not count as an active dialog.
