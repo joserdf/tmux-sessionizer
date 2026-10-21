@@ -65,8 +65,9 @@ fn agent_status_to_dispatch(status: Option<AgentStatus>) -> DispatchSessionStatu
     }
 }
 
-/// Count Running cards whose session is alive — any status except Gone — for
-/// the per-board and global concurrency cap. A card with no status entry (no
+/// Count Running and NeedsYou cards whose session is alive — any status
+/// except Gone — for the per-board and global concurrency cap. A card waiting
+/// on the user still holds its agent session. A card with no status entry (no
 /// live session) is not counted.
 fn assess_running(
     cards: &[Card],
@@ -74,7 +75,7 @@ fn assess_running(
 ) -> usize {
     cards
         .iter()
-        .filter(|c| c.column == Column::Running)
+        .filter(|c| matches!(c.column, Column::Running | Column::NeedsYou))
         .filter(|c| {
             statuses
                 .get(&c.id.0)
@@ -222,11 +223,17 @@ fn render_prompt(board: &BoardConfig, card: &Card) -> Result<String> {
         .replace("{{key}}", &card.key))
 }
 
+/// Pins the agent to its worktree: the dispatcher only finds commits on the
+/// card's branch, so work committed in another checkout is lost to it.
+const WORKTREE_NOTE: &str = "Work and commit only in the current directory: it \
+is a git worktree on this card's branch. Do not cd into or commit in any other \
+checkout of the repository.";
+
 fn default_prompt(card: &Card) -> String {
     if card.body.trim().is_empty() {
-        card.title.clone()
+        format!("{}\n\n{WORKTREE_NOTE}", card.title)
     } else {
-        format!("{}\n\n{}", card.title, card.body)
+        format!("{}\n\n{}\n\n{WORKTREE_NOTE}", card.title, card.body)
     }
 }
 
@@ -937,6 +944,30 @@ mod tests {
         let mut statuses = HashMap::new();
         statuses.insert("a".to_string(), DispatchSessionStatus::Gone);
         assert_eq!(assess_running(&cards, &statuses), 0);
+    }
+
+    #[test]
+    fn needs_you_card_counts_toward_cap() {
+        // A card waiting on the user still holds a live agent session; moving
+        // it to NeedsYou must not free a slot for the next Ready card.
+        let cards = vec![
+            card("ask", Column::NeedsYou, None),
+            card("review", Column::Review, None),
+        ];
+        let mut statuses = HashMap::new();
+        statuses.insert("ask".to_string(), DispatchSessionStatus::NeedsAttention);
+        statuses.insert("review".to_string(), DispatchSessionStatus::Idle);
+        assert_eq!(assess_running(&cards, &statuses), 1);
+    }
+
+    #[test]
+    fn default_prompt_pins_agent_to_its_worktree() {
+        let mut c = card("a", Column::Ready, None);
+        c.title = "Add a flag".to_string();
+        c.body = "Details.".to_string();
+        let p = default_prompt(&c);
+        assert!(p.starts_with("Add a flag\n\nDetails."));
+        assert!(p.contains("current directory"));
     }
 
     #[test]

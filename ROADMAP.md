@@ -291,10 +291,11 @@ against a private test project, and a live daemon run (2026-10-20) met the
 definition of done: Ready → session within one poll, question → Needs you,
 commits → push + PR → Review, PR merged → Done + session archived. Found on
 that run: Claude's folder-trust dialog (fresh repo) left the card Running with
-no signal (fixed: it is now an attention marker); a card in Needs you no
-longer counts against `max_running`; and an agent can `cd` out of its worktree
-and commit on the main checkout (the card then lands in Needs you with no
-commits). GitHub Projects and Jira are not started.
+no signal (now an attention marker); a card in Needs you stopped counting
+against `max_running` (now counted); and an agent could `cd` out of its
+worktree and commit on the main checkout, leaving its card with no commits
+(the default prompt now pins it to the worktree). GitHub Projects and Jira are
+not started.
 
 Open questions:
 - ~~Plane URL and version on the LAN~~ — Plane 1.4.2 serves both `issues/` and
