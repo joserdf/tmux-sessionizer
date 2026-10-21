@@ -198,6 +198,16 @@ and `close` needs `confirm: true`. Queued messages survive daemon restarts
 (but not tmux server restarts). Set `[mcp] read_only = true` in
 `~/.showrunner/config.toml` to allow only the reading tools.
 
+### Over HTTP for local clients
+
+`showrunner mcp --http 127.0.0.1:<port>` serves the same tools over Streamable
+HTTP, for clients that don't run in tmux (e.g. carcara-duo). It listens on a
+loopback address only and rejects any other bind. Every request needs
+`Authorization: Bearer <token>`, the token in `~/.showrunner/mcp_token` — a
+0600 file, created on first start, 32 random bytes as hex — so a local client
+never holds a session or shell. The `[mcp] read_only` setting applies to the
+HTTP transport too.
+
 ## Configuration
 
 - State: `~/.showrunner/` (projects, tasks, session records, worktrees)

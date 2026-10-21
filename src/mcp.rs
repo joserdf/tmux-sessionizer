@@ -3,11 +3,25 @@
 //! (`claude mcp add showrunner -- showrunner mcp`); the agent's own pane
 //! (`$TMUX_PANE`) is protected from its actions. The tools are thin async
 //! wrappers over [`crate::control`], run on blocking threads.
+//!
+//! `showrunner mcp --http <addr>` serves the same tools over Streamable HTTP
+//! for local clients that don't run in tmux (e.g. carcara-duo): loopback
+//! only, and every request needs `Authorization: Bearer <token>`, the token
+//! in `~/.showrunner/mcp_token` (0600, created on first start).
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::SocketAddr;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
+use axum::extract::{Request, State};
+use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -662,6 +676,15 @@ impl ServerHandler for Server {
     }
 }
 
+/// `showrunner mcp [--http <addr>]`.
+pub fn cmd(args: &[String]) -> Result<()> {
+    match args {
+        [] => run(),
+        [flag, addr] if flag == "--http" => run_http(addr),
+        _ => bail!("usage: showrunner mcp [--http 127.0.0.1:<port>]"),
+    }
+}
+
 /// `showrunner mcp`: serve on stdio until the client disconnects.
 pub fn run() -> Result<()> {
     let read_only = Config::load().map(|c| c.mcp.read_only).unwrap_or(false);
@@ -678,10 +701,135 @@ pub fn run() -> Result<()> {
         })
 }
 
+/// The bearer token file of `showrunner mcp --http`.
+pub fn token_path() -> PathBuf {
+    crate::config::base_dir().join("mcp_token")
+}
+
+/// The token in `path`, created (owner-only, 32 random bytes as hex) on
+/// first use. Refuses a file others can read.
+fn load_token(path: &Path) -> Result<String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(mut f) => {
+            let mut bytes = [0u8; 32];
+            std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            f.write_all(hex.as_bytes())?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("creating {}", path.display())),
+    }
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    if mode & 0o077 != 0 {
+        bail!("{} must be readable by its owner only (chmod 600)", path.display());
+    }
+    let token = std::fs::read_to_string(path)?.trim().to_string();
+    if token.is_empty() {
+        bail!("{} is empty; delete it and start again", path.display());
+    }
+    Ok(token)
+}
+
+/// Constant-time comparison, so the check doesn't leak how much matched.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// True when `value` (an `Authorization` header) carries `token`.
+fn authorized(value: Option<&str>, token: &str) -> bool {
+    value
+        .and_then(|v| v.split_once(' '))
+        .is_some_and(|(scheme, t)| scheme.eq_ignore_ascii_case("bearer") && same(t.trim().as_bytes(), token.as_bytes()))
+}
+
+async fn check_bearer(State(token): State<Arc<String>>, req: Request, next: Next) -> Response {
+    let value = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    if !authorized(value, &token) {
+        return (StatusCode::UNAUTHORIZED, "invalid bearer token").into_response();
+    }
+    next.run(req).await
+}
+
+/// `showrunner mcp --http <addr>`: the tools over Streamable HTTP, stateless
+/// with JSON responses, on a loopback address only.
+pub fn run_http(addr: &str) -> Result<()> {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+
+    let addr: SocketAddr = addr.parse().with_context(|| format!("not an address: {addr}"))?;
+    if !addr.ip().is_loopback() {
+        bail!("--http listens on loopback only (127.0.0.1 or ::1)");
+    }
+    let path = token_path();
+    let token = Arc::new(load_token(&path)?);
+    let read_only = Config::load().map(|c| c.mcp.read_only).unwrap_or(false);
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            let service: StreamableHttpService<Server, LocalSessionManager> = StreamableHttpService::new(
+                move || Ok(Server::new(read_only)),
+                Default::default(),
+                // The default allowed hosts are loopback names: no DNS rebinding.
+                StreamableHttpServerConfig::default()
+                    .with_legacy_session_mode(false)
+                    .with_json_response(true)
+                    .with_sse_keep_alive(None)
+                    .enforce_origin_validation(), // no browser page may call it
+            );
+            let app = axum::Router::new()
+                .nest_service("/mcp", service)
+                .layer(middleware::from_fn_with_state(token, check_bearer));
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            println!("showrunner MCP on http://{addr}/mcp (token in {})", path.display());
+            axum::serve(listener, app).await?;
+            Ok(())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tasks::{Card, CardId, Column};
+
+    #[test]
+    fn bearer_token_must_match() {
+        assert!(authorized(Some("Bearer abc"), "abc"));
+        assert!(authorized(Some("bearer abc "), "abc"));
+        assert!(!authorized(Some("Bearer abd"), "abc"));
+        assert!(!authorized(Some("Bearer ab"), "abc"));
+        assert!(!authorized(Some("Basic abc"), "abc"));
+        assert!(!authorized(Some("abc"), "abc"));
+        assert!(!authorized(None, "abc"));
+    }
+
+    #[test]
+    fn token_is_created_once_for_its_owner_only() {
+        let dir = std::env::temp_dir().join(format!("showrunner-token-{}", std::process::id()));
+        let path = dir.join("mcp_token");
+        let first = load_token(&path).unwrap();
+        assert_eq!(first.len(), 64);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(load_token(&path).unwrap(), first);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_token(&path).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn http_refuses_non_loopback() {
+        assert!(run_http("0.0.0.0:7879").is_err());
+        assert!(run_http("not-an-address").is_err());
+    }
 
     fn card(id: &str, col: Column, priority: Option<u8>) -> Card {
         Card {

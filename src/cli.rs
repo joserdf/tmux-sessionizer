@@ -63,6 +63,9 @@ Restore (snapshot in ~/.showrunner/snapshot.json, taken by the daemon):
 MCP server (lets a coding agent list, read, message and manage sessions):
   showrunner mcp                                serve on stdio, e.g.
                                                 `claude mcp add showrunner -- showrunner mcp`
+  showrunner mcp --http 127.0.0.1:<port>        serve over HTTP for local clients that
+                                                aren't in tmux; bearer token in
+                                                ~/.showrunner/mcp_token (0600)
 
 Task boards (native provider; Plane/GitHub/Jira later):
   showrunner board                            TUI kanban board view
@@ -95,7 +98,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("restore") => Some(cmd_restore(rest)),
         Some("closed") => Some(cmd_closed(rest)),
         Some("reopen") => Some(cmd_reopen(rest)),
-        Some("mcp") => Some(crate::mcp::run()),
+        Some("mcp") => Some(crate::mcp::cmd(rest)),
         Some("sessions") => Some(crate::sessions_view::run()),
         Some("--help" | "-h" | "help") => {
             print!("{HELP}");
