@@ -13,6 +13,10 @@ After=default.target
 
 [Service]
 ExecStart=%h/tmux-sessionizer/target/release/showrunner serve
+# Stopping the daemon must not kill the tmux server it runs next to: the
+# server is started from the same cgroup, and the default (control-group)
+# would take every session down with a daemon restart.
+KillMode=process
 Restart=on-failure
 RestartSec=2
 

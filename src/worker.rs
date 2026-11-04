@@ -755,6 +755,11 @@ fn worker_loop(
         inventory::apply_window_options(&mut published_windows, &panes, &pane_states, now);
         crate::naming::apply_names(&panes, &pane_states, &naming, &hostname);
         snapshots.tick(&panes, &mut pane_states, &restore.redact, now);
+        if crate::snapshot::stop_requested() {
+            // Daemon stop (SIGTERM): keep the state the tmux server has now.
+            snapshots.flush(&panes, &mut pane_states, &restore.redact, now);
+            std::process::exit(0);
+        }
 
         // Surface a permission prompt to the OS (once per transition), so the
         // user is alerted even when the TUI is in another pane. The tmux status

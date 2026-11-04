@@ -139,6 +139,18 @@ pub fn run(bind: &str) -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async {
+        // SIGTERM (a systemd stop, or a reboot): the worker saves the current
+        // snapshot on its next tick. The fallback exit keeps a stuck worker
+        // from holding the daemon up until systemd sends SIGKILL.
+        tokio::spawn(async {
+            use tokio::signal::unix::{SignalKind, signal};
+            if let Ok(mut term) = signal(SignalKind::terminate()) {
+                term.recv().await;
+                crate::snapshot::request_stop();
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                std::process::exit(0);
+            }
+        });
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let port = listener.local_addr()?.port();
         println!("showrunner serving on http://{bind}");
