@@ -66,6 +66,8 @@ struct ReadOutput {
     target: String,
     #[schemars(description = "Lines from the bottom, up to 500 (default 80)")]
     lines: Option<usize>,
+    #[schemars(description = "Return the full screen, TUI chrome included (default false)")]
+    raw: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -138,6 +140,10 @@ struct CreateSession {
     #[schemars(description = "First prompt for the agent")]
     prompt: Option<String>,
     category: Option<String>,
+    #[schemars(
+        description = "OpenCode only: launch with --auto, which allows every permission without asking. Default false: OpenCode stops at permission and question dialogs, and the session shows them as permission/question status"
+    )]
+    auto: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -429,11 +435,14 @@ impl Server {
     }
 
     #[tool(
-        description = "The last lines of a pane's screen and scrollback, as plain text",
+        description = "The last lines of a pane's conversation as plain text, without the TUI chrome (input box, status bar, borders). Pass raw=true for the full screen",
         annotations(read_only_hint = true)
     )]
     async fn read_output(&self, Parameters(p): Parameters<ReadOutput>) -> Out {
-        with_inventory(move |inv, _| inv.read_output(&p.target, p.lines.unwrap_or(80))).await
+        with_inventory(move |inv, _| {
+            inv.read_output(&p.target, p.lines.unwrap_or(80), p.raw.unwrap_or(false))
+        })
+        .await
     }
 
     #[tool(
@@ -550,6 +559,7 @@ impl Server {
                 p.agent.as_deref(),
                 p.prompt.as_deref(),
                 p.category.as_deref(),
+                p.auto.unwrap_or(false),
             )
         })
         .await
@@ -662,7 +672,7 @@ impl Server {
             let record = crate::config::load_sessions()
                 .remove(&p.session)
                 .ok_or_else(|| anyhow::anyhow!("'{}' is not a showrunner task session", p.session))?;
-            let mut v = inv.read_output(&p.session, p.lines.unwrap_or(40))?;
+            let mut v = inv.read_output(&p.session, p.lines.unwrap_or(40), false)?;
             let cwd = inv.resolve(&p.session)?.pane.cwd.clone();
             v["session"] = json!(p.session);
             v["commits"] = json!(crate::ops::commits_since(&cwd, &record.task_branch)?);

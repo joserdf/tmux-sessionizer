@@ -380,12 +380,15 @@ impl Inventory {
         Ok(v)
     }
 
-    pub fn read_output(&self, target: &str, lines: usize) -> Result<Value> {
+    /// The last `lines` of a pane. Unless `raw`, the TUI chrome is removed
+    /// (see [`clean_capture`]).
+    pub fn read_output(&self, target: &str, lines: usize, raw: bool) -> Result<Value> {
         let t = self.resolve(target)?;
+        let text = capture(&t.pane.id, lines.clamp(1, 500))?;
         Ok(json!({
             "pane": t.pane.id,
             "status": self.status(t.pane).map(|s| s.code()),
-            "output": capture(&t.pane.id, lines.clamp(1, 500))?,
+            "output": if raw { text } else { clean_capture(&text) },
         }))
     }
 
@@ -489,13 +492,14 @@ impl Inventory {
         agent: Option<&str>,
         prompt: Option<&str>,
         category: Option<&str>,
+        auto: bool,
     ) -> Result<Value> {
         check_session_name(name)?;
         if self.panes.iter().any(|p| p.session == name) {
             bail!("session {name:?} exists");
         }
         let cwd = existing_dir(cwd)?;
-        let command = agent_command(agent, &cwd, prompt)?;
+        let command = agent_command(agent, &cwd, prompt, auto)?;
         if let Some(c) = category.filter(|c| !c.is_empty()) {
             crate::category::validate(c)?;
         }
@@ -530,7 +534,7 @@ impl Inventory {
         let base = self.resolve(session.split(':').next().unwrap_or(session))?;
         let session = base.pane.session.as_str();
         let cwd = existing_dir(cwd.unwrap_or(&base.pane.cwd))?;
-        let command = agent_command(agent, &cwd, prompt)?;
+        let command = agent_command(agent, &cwd, prompt, true)?;
         let target = format!("={session}:");
         let mut args = vec![
             "new-window",
@@ -816,16 +820,72 @@ fn existing_dir(path: &str) -> Result<String> {
     Ok(path)
 }
 
+/// Keep the conversation part of a captured TUI pane. Claude Code, Codex and
+/// OpenCode draw an input box (a rule, the prompt line, a rule) with a status
+/// bar and shortcut hints below it. Everything from the box's top rule down is
+/// dropped, and the remaining box borders and rules are removed. Blank runs
+/// collapse to one line. Text without an input box is only trimmed.
+pub(crate) fn clean_capture(text: &str) -> String {
+    fn is_rule(line: &str) -> bool {
+        let t = line.trim();
+        t.chars().count() >= 8 && t.chars().all(|c| matches!(c, '─' | '━' | '═'))
+    }
+    fn is_prompt(line: &str) -> bool {
+        let t = line.trim_start();
+        ["❯", ">", "›"]
+            .iter()
+            .any(|p| t == *p || t.strip_prefix(p).is_some_and(|rest| rest.starts_with(' ')))
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    // The input box's top rule is the last rule with the prompt line right
+    // under it (within two lines, the box's content).
+    let end = (0..lines.len())
+        .rev()
+        .find(|&i| is_rule(lines[i]) && lines.iter().skip(i + 1).take(2).any(|l| is_prompt(l)))
+        .unwrap_or(lines.len());
+
+    let mut out: Vec<String> = Vec::new();
+    for line in &lines[..end] {
+        if is_rule(line) {
+            continue;
+        }
+        let mut l = line.trim_end();
+        // A box row drawn between side borders keeps only its content.
+        if l.starts_with('│') && l.ends_with('│') && l.chars().count() >= 2 {
+            l = l.trim_matches('│').trim();
+        }
+        if l.trim().is_empty() {
+            if out.last().is_none_or(String::is_empty) {
+                continue;
+            }
+            out.push(String::new());
+        } else {
+            out.push(l.to_string());
+        }
+    }
+    while out.last().is_some_and(String::is_empty) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
 /// The command that starts `agent` in `cwd` with an optional first prompt.
-fn agent_command(agent: Option<&str>, cwd: &str, prompt: Option<&str>) -> Result<Option<String>> {
+/// `auto` is OpenCode's `--auto` (see `build_agent_command_auto`).
+fn agent_command(
+    agent: Option<&str>,
+    cwd: &str,
+    prompt: Option<&str>,
+    auto: bool,
+) -> Result<Option<String>> {
     let prompt = prompt.filter(|p| !p.trim().is_empty());
     match agent.filter(|a| !a.is_empty()) {
         Some(a) => {
             let kind = AgentKind::from_id(a).with_context(|| {
                 format!("unknown agent {a:?} (one of {})", AgentKind::ids().join(", "))
             })?;
-            Ok(Some(crate::tmux::build_agent_command(
-                kind, cwd, None, prompt, false,
+            Ok(Some(crate::tmux::build_agent_command_auto(
+                kind, cwd, None, prompt, false, auto,
             )))
         }
         None if prompt.is_some() => bail!("a prompt needs an agent"),
@@ -933,6 +993,31 @@ pub fn answer_option(options: &[(u32, String)], choice: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_capture_drops_input_box_and_status_bar() {
+        let screen = "⏺ Done, 3 files changed.\n\n● Next step\n───────────────\n❯ \n───────────────\n  ? for shortcuts";
+        assert_eq!(clean_capture(screen), "⏺ Done, 3 files changed.\n\n● Next step");
+    }
+
+    #[test]
+    fn clean_capture_strips_box_borders_and_blank_runs() {
+        let screen = "│ hello world │\n\n\n\n│ second │";
+        assert_eq!(clean_capture(screen), "hello world\n\nsecond");
+    }
+
+    #[test]
+    fn clean_capture_keeps_markdown_rules_without_input_box() {
+        let screen = "title\n---\nbody\n";
+        assert_eq!(clean_capture(screen), "title\n---\nbody");
+    }
+
+    #[test]
+    fn clean_capture_keeps_quoted_prompt_text_above_the_box() {
+        // A `>` quote in the conversation is not an input box unless a rule sits above it.
+        let screen = "> quoted line\nreply\n";
+        assert_eq!(clean_capture(screen), "> quoted line\nreply");
+    }
 
     fn pane(id: &str, session: &str, window: &str, index: u32, name: &str, active: bool) -> Pane {
         inventory::parse_panes(&format!(

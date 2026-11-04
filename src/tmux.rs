@@ -1186,6 +1186,21 @@ pub(crate) fn build_agent_command(
     initial_prompt: Option<&str>,
     resume: bool,
 ) -> String {
+    build_agent_command_auto(agent, work_dir, system_prompt, initial_prompt, resume, true)
+}
+
+/// [`build_agent_command`] with an explicit `auto` for OpenCode: `true`
+/// launches it with `--auto` (allow every permission, so no dialog ever
+/// waits); `false` keeps its permission dialogs, which the showrunner plugin
+/// reports as `permission` status.
+pub(crate) fn build_agent_command_auto(
+    agent: AgentKind,
+    work_dir: &str,
+    system_prompt: Option<&str>,
+    initial_prompt: Option<&str>,
+    resume: bool,
+    auto: bool,
+) -> String {
     match agent {
         AgentKind::Claude => {
             let mut cmd = String::from("claude --dangerously-skip-permissions");
@@ -1253,9 +1268,12 @@ pub(crate) fn build_agent_command(
         AgentKind::OpenCode => {
             // OpenCode's TUI positional is the *project directory*, not a
             // message — the prompt goes through `--prompt`. `--auto` mirrors the
-            // other agents' yolo launch; without it opencode stalls on every
-            // permission dialog.
-            let mut cmd = String::from("opencode --auto");
+            // other agents' yolo launch; without it opencode stops at every
+            // permission dialog until someone answers it.
+            let mut cmd = String::from("opencode");
+            if auto {
+                cmd.push_str(" --auto");
+            }
             if resume {
                 // cwd-scoped: continues the last session for this work dir.
                 cmd.push_str(" --continue");
@@ -2840,6 +2858,54 @@ pub fn cleanup_project_dirs(project_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- build_agent_command_auto (OpenCode --auto) ---
+
+    #[test]
+    fn opencode_auto_flag_follows_parameter() {
+        let auto = build_agent_command_auto(AgentKind::OpenCode, "/w", None, None, false, true);
+        assert_eq!(auto, "opencode --auto");
+        let manual = build_agent_command_auto(AgentKind::OpenCode, "/w", None, None, false, false);
+        assert_eq!(manual, "opencode");
+        // The default wrapper keeps the old launch.
+        let default = build_agent_command(AgentKind::OpenCode, "/w", None, None, false);
+        assert_eq!(default, "opencode --auto");
+    }
+
+    // --- detect_attention_dialog ---
+
+    #[test]
+    fn attention_dialog_claude_permission_prompt() {
+        let pane = "Bash(rm -rf build)\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n";
+        assert!(detect_attention_dialog(pane, AgentKind::Claude));
+    }
+
+    #[test]
+    fn attention_dialog_claude_input_prompt_suppresses_match() {
+        // Dialog text echoed in the transcript, with the input prompt back on screen.
+        let pane = "Do you want to proceed?\n  1. Yes\n\n───────\n❯\n───────\n";
+        assert!(!detect_attention_dialog(pane, AgentKind::Claude));
+    }
+
+    #[test]
+    fn attention_dialog_opencode_permission() {
+        let pane = "Permission required\n  Allow once\n  Allow always\n  Reject\n";
+        assert!(detect_attention_dialog(pane, AgentKind::OpenCode));
+    }
+
+    #[test]
+    fn attention_dialog_codex_selector() {
+        let pane = "Would you like to make the following edits?\n› 1. Yes, proceed\n  2. No\n";
+        assert!(detect_attention_dialog(pane, AgentKind::Codex));
+    }
+
+    #[test]
+    fn attention_dialog_plain_output_is_not_a_dialog() {
+        let pane = "building crate...\n   Compiling showrunner v0.1.0\n";
+        assert!(!detect_attention_dialog(pane, AgentKind::Claude));
+        assert!(!detect_attention_dialog(pane, AgentKind::Codex));
+        assert!(!detect_attention_dialog(pane, AgentKind::OpenCode));
+    }
 
     // --- sanitize ---
 
