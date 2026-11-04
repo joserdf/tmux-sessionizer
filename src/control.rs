@@ -359,6 +359,13 @@ impl Inventory {
         if let Some(e) = self.state(p).and_then(|s| s.last_event.as_ref()) {
             v["last_event"] = json!(e);
         }
+        if let Some(st) = self.state(p)
+            && let Some(kind) = st.agent.as_deref().and_then(AgentKind::from_id)
+            && let Some(id) = st.agent_session_id.as_deref()
+            && let Some(msg) = crate::search::last_message(kind, id)
+        {
+            v["last_message"] = json!(msg);
+        }
         if matches!(
             self.status(p),
             Some(AgentStatus::Question | AgentStatus::Permission)

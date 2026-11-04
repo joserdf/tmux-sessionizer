@@ -427,7 +427,7 @@ impl Server {
     }
 
     #[tool(
-        description = "One window's details: agent, status, branch, last hook event, and the options of a pending question or permission",
+        description = "One window's details: agent, status, branch, last hook event, last assistant text message, and the options of a pending question or permission",
         annotations(read_only_hint = true)
     )]
     async fn get_status(&self, Parameters(p): Parameters<TargetArg>) -> Out {
