@@ -225,11 +225,14 @@ pub fn update_statuses<'a>(
         };
         st.update_view(pane.active && pane.attached, now);
         let mut status = st.derive_status(pane, now);
-        // TOML agents have no hooks: an idle pane showing one of their
-        // attention markers is waiting on a permission or question.
+        // Agents whose hooks miss a permission or question (built-in kinds
+        // without a permission hook, and TOML agents) are detected from the
+        // screen: an idle pane showing one of their attention markers is
+        // waiting on the user. Built-in kinds keep their markers in
+        // `attention_markers()`, not in a TOML def, so check that directly.
         if status == Some(AgentStatus::Idle)
             && let Some(kind) = st.agent.as_deref().and_then(AgentKind::from_id)
-            && kind.def().is_some_and(|d| !d.attention_markers.is_empty())
+            && !kind.attention_markers().is_empty()
             && crate::control::capture(&pane.id, 40)
                 .is_ok_and(|text| crate::tmux::detect_attention_dialog(&text, kind))
         {
@@ -481,26 +484,36 @@ pub fn refresh_states(states: &mut HashMap<String, PaneState>, panes: &[Pane]) {
     }
 }
 
-/// The pane a hook event came from: its `$TMUX_PANE` when that pane exists,
-/// else the single agent pane whose cwd matches (ambiguous matches resolve to
-/// nothing rather than to the wrong pane).
+/// The pane a hook event came from. `$TMUX_PANE` names the pane only when the
+/// hook runs in that pane's process tree. Codex hooks run in a shared
+/// app-server that inherits the `TMUX_PANE` of whichever pane started it, so
+/// a pane whose cwd differs from the event's cwd is not trusted. The single
+/// agent pane with the event's cwd wins; ambiguous or absent matches keep the
+/// `$TMUX_PANE` pane, which is what the event named.
 pub fn resolve_hook_pane<'a>(
     panes: &'a [Pane],
     states: &HashMap<String, PaneState>,
     tmux_pane: Option<&str>,
     cwd: Option<&str>,
 ) -> Option<&'a Pane> {
-    if let Some(id) = tmux_pane
-        && let Some(p) = panes.iter().find(|p| p.id == id)
+    let by_id = tmux_pane.and_then(|id| panes.iter().find(|p| p.id == id));
+    let Some(cwd) = cwd else {
+        return by_id;
+    };
+    if let Some(p) = by_id
+        && p.cwd == cwd
     {
         return Some(p);
     }
-    let cwd = cwd?;
-    let mut matches = panes
+    let matches: Vec<&Pane> = panes
         .iter()
-        .filter(|p| p.cwd == cwd && states.get(&p.id).is_some_and(|s| s.agent.is_some()));
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
+        .filter(|p| p.cwd == cwd && states.get(&p.id).is_some_and(|s| s.agent.is_some()))
+        .collect();
+    let by_cwd = match matches.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    };
+    by_cwd.or(by_id)
 }
 
 #[cfg(test)]
@@ -852,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_hook_pane_prefers_tmux_pane_then_unique_cwd() {
+    fn resolve_hook_pane_trusts_tmux_pane_only_when_cwd_agrees() {
         let panes = vec![
             pane("%1", "s", "claude", "/a"),
             pane("%2", "s", "claude", "/a"),
@@ -863,8 +876,19 @@ mod tests {
         refresh_states(&mut states, &panes);
 
         let id = |p: Option<&Pane>| p.map(|p| p.id.clone());
+        // %2 is in /a, but the event is from /b: the unique agent in /b wins.
         assert_eq!(
             id(resolve_hook_pane(&panes, &states, Some("%2"), Some("/b"))),
+            Some("%3".into())
+        );
+        // Same cwd: the named pane is trusted even when two agents share /a.
+        assert_eq!(
+            id(resolve_hook_pane(&panes, &states, Some("%2"), Some("/a"))),
+            Some("%2".into())
+        );
+        // No cwd match at all: keep the pane the event named.
+        assert_eq!(
+            id(resolve_hook_pane(&panes, &states, Some("%2"), Some("/nowhere"))),
             Some("%2".into())
         );
         // Unknown pane id falls back to cwd; only the agent pane in /b counts.

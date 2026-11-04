@@ -174,6 +174,7 @@ pub fn parse_opencode_hook(json: &str) -> Option<AgentEvent> {
             Some(AgentEvent::Error(message.to_owned()))
         }
         "permission.request" => Some(AgentEvent::PermissionRequest),
+        "question.request" => Some(AgentEvent::Question),
         _ => None,
     }
 }
@@ -192,6 +193,9 @@ pub fn parse_codex_hook(json: &str) -> Option<AgentEvent> {
         "SessionStart" => Some(AgentEvent::SessionStarted),
         "SessionEnd" => Some(AgentEvent::SessionStopped),
         "PermissionRequest" => Some(AgentEvent::PermissionRequest),
+        // A tool ran after the permission was answered (approved or
+        // declined), so the agent is busy again and the permission is gone.
+        "PostToolUse" => Some(AgentEvent::Working),
         "Stop" => Some(AgentEvent::Finished),
         _ => None,
     }
@@ -406,6 +410,13 @@ mod tests {
     }
 
     #[test]
+    fn opencode_question_request_is_question() {
+        // Forwarded by the plugin on OpenCode's `question.asked` bus event.
+        let json = r#"{"type":"question.request","session_id":"ses_1","cwd":"/w"}"#;
+        assert_eq!(parse_opencode_hook(json), Some(AgentEvent::Question));
+    }
+
+    #[test]
     fn opencode_unknown_type_is_none() {
         let json = r#"{"type":"message.part.updated","message":"part updated"}"#;
         assert_eq!(parse_opencode_hook(json), None);
@@ -434,6 +445,12 @@ mod tests {
     fn codex_permission_request() {
         let json = r#"{"hook":"PermissionRequest","message":"Allow running npm install?"}"#;
         assert_eq!(parse_codex_hook(json), Some(AgentEvent::PermissionRequest));
+    }
+
+    #[test]
+    fn codex_post_tool_use_is_working() {
+        let json = r#"{"hook":"PostToolUse","message":"tool finished"}"#;
+        assert_eq!(parse_codex_hook(json), Some(AgentEvent::Working));
     }
 
     #[test]
