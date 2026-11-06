@@ -500,13 +500,21 @@ impl Inventory {
         prompt: Option<&str>,
         category: Option<&str>,
         auto: bool,
+        settings: Option<&str>,
     ) -> Result<Value> {
         check_session_name(name)?;
         if self.panes.iter().any(|p| p.session == name) {
             bail!("session {name:?} exists");
         }
         let cwd = existing_dir(cwd)?;
-        let command = agent_command(agent, &cwd, prompt, auto)?;
+        let command = match (agent_command(agent, &cwd, prompt, auto)?, settings.filter(|s| !s.is_empty())) {
+            (Some(cmd), settings) => {
+                let kind = AgentKind::from_id(agent.unwrap_or_default()).unwrap_or_default();
+                Some(crate::tmux::with_settings(kind, cmd, settings)?)
+            }
+            (None, Some(_)) => bail!("a settings file needs an agent"),
+            (None, None) => None,
+        };
         if let Some(c) = category.filter(|c| !c.is_empty()) {
             crate::category::validate(c)?;
         }

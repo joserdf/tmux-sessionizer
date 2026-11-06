@@ -144,6 +144,10 @@ struct CreateSession {
         description = "OpenCode only: launch with --auto, which allows every permission without asking. Default false: OpenCode stops at permission and question dialogs, and the session shows them as permission/question status"
     )]
     auto: Option<bool>,
+    #[schemars(
+        description = "Claude or OpenCode only: absolute path of a settings file the agent starts with. Claude Code gets `--settings <file>` and follows its permission rules instead of skipping them; OpenCode gets it as OPENCODE_CONFIG on a private server, without --auto"
+    )]
+    settings: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -214,6 +218,10 @@ struct SpawnWorker {
     prompt: String,
     #[schemars(description = "Agent id: claude, codex, pi, opencode or an agents.toml id (default: the parent's agent)")]
     agent: Option<String>,
+    #[schemars(
+        description = "Claude or OpenCode only: absolute path of a settings file the worker starts with (as in create_session)"
+    )]
+    settings: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -560,6 +568,7 @@ impl Server {
                 p.prompt.as_deref(),
                 p.category.as_deref(),
                 p.auto.unwrap_or(false),
+                p.settings.as_deref(),
             )
         })
         .await
@@ -632,7 +641,7 @@ impl Server {
     )]
     async fn spawn_worker(&self, Parameters(p): Parameters<SpawnWorker>) -> Out {
         self.act(move |_, cfg| {
-            let worker = crate::ops::spawn_worker(cfg, &p.parent, &p.prompt, p.agent.as_deref())?;
+            let worker = crate::ops::spawn_worker(cfg, &p.parent, &p.prompt, p.agent.as_deref(), p.settings.as_deref())?;
             Ok(json!({ "worker": worker, "parent": p.parent }))
         })
         .await

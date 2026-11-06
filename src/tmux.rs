@@ -312,6 +312,7 @@ pub fn create_task_branch(project_path: &str, branch_name: &str, base: Option<&s
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_session(
     project_name: &str,
     project_path: &str,
@@ -325,6 +326,40 @@ pub fn create_session(
     startup_skills: &[String],
     agent: AgentKind,
 ) -> Result<String> {
+    create_session_with(
+        project_name,
+        project_path,
+        task_name,
+        task_branch,
+        session_name,
+        use_worktree,
+        copy_patterns,
+        setup_commands,
+        initial_prompt,
+        startup_skills,
+        agent,
+        None,
+    )
+}
+
+/// [`create_session`] whose agent starts with a settings file (see [`with_settings`]).
+#[allow(clippy::too_many_arguments)]
+pub fn create_session_with(
+    project_name: &str,
+    project_path: &str,
+    task_name: &str,
+    task_branch: &str,
+    session_name: &str,
+    use_worktree: bool,
+    copy_patterns: &[String],
+    setup_commands: &[String],
+    initial_prompt: Option<&str>,
+    startup_skills: &[String],
+    agent: AgentKind,
+    settings: Option<&str>,
+) -> Result<String> {
+    // Checked before any worktree is made, so a bad path leaves nothing behind
+    with_settings(agent, String::new(), settings)?;
     let tmux_name = build_tmux_name(project_name, task_name, session_name);
 
     let work_dir;
@@ -406,13 +441,17 @@ pub fn create_session(
         is_main_session(session_name),
     );
 
-    let agent_cmd = build_agent_command(
+    let agent_cmd = with_settings(
         agent,
-        &work_dir,
-        Some(&system_prompt),
-        build_initial_prompt(startup_skills, initial_prompt, agent).as_deref(),
-        false,
-    );
+        build_agent_command(
+            agent,
+            &work_dir,
+            Some(&system_prompt),
+            build_initial_prompt(startup_skills, initial_prompt, agent).as_deref(),
+            false,
+        ),
+        settings,
+    )?;
 
     let output = Command::new("tmux")
         .args([
@@ -1172,6 +1211,41 @@ pub fn session_agent(session_name: &str) -> AgentKind {
     get_session_env(session_name, "CM_AGENT")
         .and_then(|id| AgentKind::from_id(id.trim()))
         .unwrap_or_default()
+}
+
+/// `cmd`, the launch of `agent`, changed to start with the settings file at
+/// `settings` (an absolute path): Claude Code reads it with `--settings` and,
+/// instead of `--dangerously-skip-permissions`, follows the permission rules and
+/// mode in it; OpenCode reads it as `OPENCODE_CONFIG` on a private server
+/// (`--standalone`, as the background service ignores the variable) and drops
+/// `--auto`. Other agents take no settings file. `None` leaves `cmd` as it is.
+pub(crate) fn with_settings(agent: AgentKind, cmd: String, settings: Option<&str>) -> Result<String> {
+    let Some(path) = settings.filter(|s| !s.is_empty()) else {
+        return Ok(cmd);
+    };
+    if !path.starts_with('/') || !Path::new(path).is_file() {
+        bail!("settings must be the absolute path of an existing file: {path:?}");
+    }
+    // An empty `cmd` only validates `settings`; any other must be the launch we know, or its arguments would be lost
+    let rest_after = |prefix: &str| -> Result<&str> {
+        match cmd.strip_prefix(prefix) {
+            Some(rest) => Ok(rest),
+            None if cmd.is_empty() => Ok(""),
+            None => bail!("unexpected {} launch, cannot add a settings file: {cmd:?}", agent.id()),
+        }
+    };
+    match agent {
+        AgentKind::Claude => {
+            let rest = rest_after("claude --dangerously-skip-permissions")?;
+            Ok(format!("claude --settings {}{rest}", shell_escape(path)))
+        }
+        AgentKind::OpenCode => {
+            let rest = rest_after("opencode")?;
+            let rest = rest.strip_prefix(" --auto").unwrap_or(rest);
+            Ok(format!("OPENCODE_CONFIG={} opencode --standalone{rest}", shell_escape(path)))
+        }
+        _ => bail!("a settings file works only with claude and opencode, not {}", agent.id()),
+    }
 }
 
 /// Assemble the shell command that launches (or resumes) the agent for a
@@ -3128,6 +3202,55 @@ mod tests {
     #[test]
     fn shell_escape_with_spaces() {
         assert_eq!(shell_escape("hello world"), "'hello world'");
+    }
+
+    /// A settings file that exists for the life of the guard.
+    struct SettingsFile(PathBuf);
+    impl Drop for SettingsFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn settings_file() -> (SettingsFile, String) {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("showrunner-settings-{}-{nanos}.json", std::process::id()));
+        fs::write(&path, "{}").unwrap();
+        let text = path.to_string_lossy().into_owned();
+        (SettingsFile(path), text)
+    }
+
+    #[test]
+    fn with_settings_leaves_the_command_alone_without_a_file() {
+        let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
+        assert_eq!(with_settings(AgentKind::Claude, cmd.clone(), None).unwrap(), cmd);
+        assert_eq!(with_settings(AgentKind::Claude, cmd.clone(), Some("")).unwrap(), cmd);
+    }
+
+    #[test]
+    fn with_settings_drops_auto_approve_for_claude() {
+        let (_dir, path) = settings_file();
+        let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
+        let out = with_settings(AgentKind::Claude, cmd, Some(&path)).unwrap();
+        assert_eq!(out, format!("claude --settings {} 'hi'", shell_escape(&path)));
+    }
+
+    #[test]
+    fn with_settings_runs_opencode_standalone_without_auto() {
+        let (_dir, path) = settings_file();
+        let out = with_settings(AgentKind::OpenCode, "opencode --auto --prompt 'hi'".to_string(), Some(&path)).unwrap();
+        assert_eq!(out, format!("OPENCODE_CONFIG={} opencode --standalone --prompt 'hi'", shell_escape(&path)));
+    }
+
+    #[test]
+    fn with_settings_refuses_missing_relative_or_unsupported() {
+        let (_dir, path) = settings_file();
+        assert!(with_settings(AgentKind::Claude, String::new(), Some("worker.settings.json")).is_err());
+        assert!(with_settings(AgentKind::Claude, String::new(), Some("/nowhere/x.json")).is_err());
+        assert!(with_settings(AgentKind::Codex, "codex".to_string(), Some(&path)).is_err());
+        // A launch in another shape would lose its arguments, so it is refused; empty only validates
+        assert!(with_settings(AgentKind::Claude, "claude --continue 'hi'".to_string(), Some(&path)).is_err());
+        assert!(with_settings(AgentKind::Claude, String::new(), Some(&path)).is_ok());
     }
 
     // --- DiffStats ---
