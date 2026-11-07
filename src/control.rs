@@ -510,7 +510,7 @@ impl Inventory {
         let command = match (agent_command(agent, &cwd, prompt, auto)?, settings.filter(|s| !s.is_empty())) {
             (Some(cmd), settings) => {
                 let kind = AgentKind::from_id(agent.unwrap_or_default()).unwrap_or_default();
-                Some(crate::tmux::with_settings(kind, cmd, settings)?)
+                Some(crate::tmux::with_settings(kind, cmd, settings, Some(name))?)
             }
             (None, Some(_)) => bail!("a settings file needs an agent"),
             (None, None) => None,

@@ -359,7 +359,7 @@ pub fn create_session_with(
     settings: Option<&str>,
 ) -> Result<String> {
     // Checked before any worktree is made, so a bad path leaves nothing behind
-    with_settings(agent, String::new(), settings)?;
+    with_settings(agent, String::new(), settings, None)?;
     let tmux_name = build_tmux_name(project_name, task_name, session_name);
 
     let work_dir;
@@ -451,6 +451,7 @@ pub fn create_session_with(
             false,
         ),
         settings,
+        Some(&tmux_name),
     )?;
 
     let output = Command::new("tmux")
@@ -1219,7 +1220,10 @@ pub fn session_agent(session_name: &str) -> AgentKind {
 /// mode in it; OpenCode reads it as `OPENCODE_CONFIG` on a private server
 /// (`--standalone`, as the background service ignores the variable) and drops
 /// `--auto`. Other agents take no settings file. `None` leaves `cmd` as it is.
-pub(crate) fn with_settings(agent: AgentKind, cmd: String, settings: Option<&str>) -> Result<String> {
+/// A settings file that sets an `agent` makes Claude Code name the session
+/// after it (every worker would show as the same agent), so `name`, the tmux
+/// session's, goes to `--name` and becomes its display name and title.
+pub(crate) fn with_settings(agent: AgentKind, cmd: String, settings: Option<&str>, name: Option<&str>) -> Result<String> {
     let Some(path) = settings.filter(|s| !s.is_empty()) else {
         return Ok(cmd);
     };
@@ -1237,7 +1241,11 @@ pub(crate) fn with_settings(agent: AgentKind, cmd: String, settings: Option<&str
     match agent {
         AgentKind::Claude => {
             let rest = rest_after("claude --dangerously-skip-permissions")?;
-            Ok(format!("claude --settings {}{rest}", shell_escape(path)))
+            let name = name
+                .filter(|n| !n.is_empty())
+                .map(|n| format!(" --name {}", shell_escape(n)))
+                .unwrap_or_default();
+            Ok(format!("claude --settings {}{name}{rest}", shell_escape(path)))
         }
         AgentKind::OpenCode => {
             let rest = rest_after("opencode")?;
@@ -3223,34 +3231,42 @@ mod tests {
     #[test]
     fn with_settings_leaves_the_command_alone_without_a_file() {
         let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
-        assert_eq!(with_settings(AgentKind::Claude, cmd.clone(), None).unwrap(), cmd);
-        assert_eq!(with_settings(AgentKind::Claude, cmd.clone(), Some("")).unwrap(), cmd);
+        assert_eq!(with_settings(AgentKind::Claude, cmd.clone(), None, None).unwrap(), cmd);
+        assert_eq!(with_settings(AgentKind::Claude, cmd.clone(), Some(""), None).unwrap(), cmd);
     }
 
     #[test]
     fn with_settings_drops_auto_approve_for_claude() {
         let (_dir, path) = settings_file();
         let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
-        let out = with_settings(AgentKind::Claude, cmd, Some(&path)).unwrap();
+        let out = with_settings(AgentKind::Claude, cmd, Some(&path), None).unwrap();
         assert_eq!(out, format!("claude --settings {} 'hi'", shell_escape(&path)));
+    }
+
+    #[test]
+    fn with_settings_names_the_claude_session() {
+        let (_dir, path) = settings_file();
+        let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
+        let out = with_settings(AgentKind::Claude, cmd, Some(&path), Some("coordinator")).unwrap();
+        assert_eq!(out, format!("claude --settings {} --name 'coordinator' 'hi'", shell_escape(&path)));
     }
 
     #[test]
     fn with_settings_runs_opencode_standalone_without_auto() {
         let (_dir, path) = settings_file();
-        let out = with_settings(AgentKind::OpenCode, "opencode --auto --prompt 'hi'".to_string(), Some(&path)).unwrap();
+        let out = with_settings(AgentKind::OpenCode, "opencode --auto --prompt 'hi'".to_string(), Some(&path), None).unwrap();
         assert_eq!(out, format!("OPENCODE_CONFIG={} opencode --standalone --prompt 'hi'", shell_escape(&path)));
     }
 
     #[test]
     fn with_settings_refuses_missing_relative_or_unsupported() {
         let (_dir, path) = settings_file();
-        assert!(with_settings(AgentKind::Claude, String::new(), Some("worker.settings.json")).is_err());
-        assert!(with_settings(AgentKind::Claude, String::new(), Some("/nowhere/x.json")).is_err());
-        assert!(with_settings(AgentKind::Codex, "codex".to_string(), Some(&path)).is_err());
+        assert!(with_settings(AgentKind::Claude, String::new(), Some("worker.settings.json"), None).is_err());
+        assert!(with_settings(AgentKind::Claude, String::new(), Some("/nowhere/x.json"), None).is_err());
+        assert!(with_settings(AgentKind::Codex, "codex".to_string(), Some(&path), None).is_err());
         // A launch in another shape would lose its arguments, so it is refused; empty only validates
-        assert!(with_settings(AgentKind::Claude, "claude --continue 'hi'".to_string(), Some(&path)).is_err());
-        assert!(with_settings(AgentKind::Claude, String::new(), Some(&path)).is_ok());
+        assert!(with_settings(AgentKind::Claude, "claude --continue 'hi'".to_string(), Some(&path), None).is_err());
+        assert!(with_settings(AgentKind::Claude, String::new(), Some(&path), None).is_ok());
     }
 
     // --- DiffStats ---
