@@ -202,9 +202,8 @@ pub struct Suspender {
 }
 
 impl Suspender {
-    /// Suspend every candidate not tried yet and notify about the ones that
-    /// were. Blocks while agents stop (up to [`STOP_WAIT`] each), so the
-    /// caller runs it on a slow cadence.
+    /// Suspend every candidate not tried yet. Blocks while agents stop (up to
+    /// [`STOP_WAIT`] each), so the caller runs it on a slow cadence.
     pub fn step(
         &mut self,
         cfg: &SuspendConfig,
@@ -216,24 +215,11 @@ impl Suspender {
         let found = candidates(cfg, panes, states, now);
         self.tried
             .retain(|id| found.iter().any(|(p, ..)| &p.id == id));
-        let mut done = Vec::new();
         for (pane, kind, session_id) in found {
             if !self.tried.insert(pane.id.clone()) || (cfg.respect_dirty && dirty(&pane.cwd)) {
                 continue;
             }
-            if let Some(text) = suspend(pane, kind, &session_id, redact) {
-                done.push(format!(
-                    "{}:{} {}: {text}",
-                    pane.session, pane.window_index, pane.window_name
-                ));
-            }
-        }
-        if !done.is_empty() {
-            crate::notify::send(&crate::notify::Notification {
-                title: "showrunner: idle agents suspended".to_string(),
-                body: done.join("\n"),
-                urgent: false,
-            });
+            suspend(pane, kind, &session_id, redact);
         }
     }
 }
