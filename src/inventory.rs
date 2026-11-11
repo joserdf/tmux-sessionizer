@@ -67,7 +67,11 @@ pub struct Pane {
     #[serde(default)]
     pub keep: bool,
     /// Title set by the program in the pane (Claude sets `✳ <session name>`).
+    #[serde(default)]
     pub title: String,
+    /// Durable tmux pane option recording the agent conversation id.
+    #[serde(default)]
+    pub agent_session_id: String,
 }
 
 /// What an agent pane needs from the user, ordered by urgency: the `max`
@@ -338,7 +342,7 @@ const FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_index}
 #{session_attached}\t#{window_activity}\t#{pane_current_command}\t\
 #{pane_current_path}\t#{automatic-rename}\t#{@sessionizer_autoname}\t\
 #{@sessionizer_lastname}\t#{@category}\t#{window_layout}\t#{@sessionizer_restore}\t\
-#{@sessionizer_keep}\t#{pane_title}";
+#{@sessionizer_keep}\t#{@sessionizer_agent_session_id}\t#{pane_title}";
 
 /// Parse `list-panes -a -F FORMAT` output. Malformed lines are skipped.
 pub fn parse_panes(stdout: &str) -> Vec<Pane> {
@@ -346,8 +350,8 @@ pub fn parse_panes(stdout: &str) -> Vec<Pane> {
 }
 
 fn parse_pane_line(line: &str) -> Option<Pane> {
-    let f: Vec<&str> = line.splitn(21, '\t').collect();
-    if f.len() != 21 {
+    let f: Vec<&str> = line.splitn(22, '\t').collect();
+    if !(f.len() == 21 || f.len() == 22) {
         return None;
     }
     Some(Pane {
@@ -372,8 +376,25 @@ fn parse_pane_line(line: &str) -> Option<Pane> {
         window_layout: f[17].to_string(),
         pending_restore: f[18].to_string(),
         keep: !matches!(f[19], "" | "0" | "off"),
-        title: f[20].to_string(),
+        agent_session_id: f[20].to_string(),
+        title: f.get(21).copied().unwrap_or_default().to_string(),
     })
+}
+
+/// Persist the agent conversation id on the pane itself. Pane options follow
+/// the pane across daemon restarts and cannot collide between equal cwd panes.
+pub fn persist_agent_session_id(pane: &str, id: Option<&str>) {
+    let mut cmd = Command::new("tmux");
+    cmd.args(["set-option", "-p", "-t", pane]);
+    match id {
+        Some(id) if !id.is_empty() => {
+            cmd.args(["@sessionizer_agent_session_id", id]);
+        }
+        _ => {
+            cmd.args(["-u", "@sessionizer_agent_session_id"]);
+        }
+    }
+    let _ = cmd.output();
 }
 
 /// Every pane on the tmux server; empty when no server is running.
@@ -412,11 +433,7 @@ pub fn detect_agent(
     argv: impl FnOnce() -> Option<Vec<String>>,
 ) -> Option<AgentKind> {
     let kinds = AgentKind::all();
-    if let Some(kind) = kinds
-        .iter()
-        .copied()
-        .find(|k| k.process_name() == command)
-    {
+    if let Some(kind) = kinds.iter().copied().find(|k| k.process_name() == command) {
         return Some(kind);
     }
     if command != "node" {
@@ -481,6 +498,9 @@ pub fn refresh_states(states: &mut HashMap<String, PaneState>, panes: &[Pane]) {
             }
             state.agent = agent;
         }
+        if state.agent_session_id.is_none() && !pane.agent_session_id.is_empty() {
+            state.agent_session_id = Some(pane.agent_session_id.clone());
+        }
     }
 }
 
@@ -522,7 +542,7 @@ mod tests {
 
     fn line(id: &str, session: &str, command: &str, cwd: &str, title: &str) -> String {
         format!(
-            "{id}\t{session}\t@1\t0\twin\t0\t100\t1\t1\t1\t1700000000\t{command}\t{cwd}\t1\t\t\t\tL\t\t\t{title}"
+            "{id}\t{session}\t@1\t0\twin\t0\t100\t1\t1\t1\t1700000000\t{command}\t{cwd}\t1\t\t\t\tL\t\t\t\t{title}"
         )
     }
 
@@ -533,7 +553,7 @@ mod tests {
     #[test]
     fn parses_all_fields() {
         let p = parse_pane_line(
-            "%3\tgates\t@2\t1\tclaude\t0\t23685\t1\t0\t2\t1791900000\tclaude\t/home/u/gates\t0\toff\tgates\twork\tab12,80x24,0,0,3\t{}\t1\t✳ gates-presentation",
+            "%3\tgates\t@2\t1\tclaude\t0\t23685\t1\t0\t2\t1791900000\tclaude\t/home/u/gates\t0\toff\tgates\twork\tab12,80x24,0,0,3\t{}\t1\t\t✳ gates-presentation",
         )
         .unwrap();
         assert_eq!(p.id, "%3");
@@ -556,12 +576,21 @@ mod tests {
         assert_eq!(p.pending_restore, "{}");
         assert!(p.keep);
         assert_eq!(p.title, "✳ gates-presentation");
+        assert_eq!(p.agent_session_id, "");
     }
 
     #[test]
     fn tab_in_title_is_kept() {
         let p = parse_pane_line(&line("%1", "s", "zsh", "/", "a\tb")).unwrap();
         assert_eq!(p.title, "a\tb");
+    }
+
+    #[test]
+    fn reads_persisted_agent_session_id_from_pane_option() {
+        let row = line("%1", "s", "claude", "/same", "title")
+            .replace("\t\ttitle", "\tsid-exact\ttitle");
+        let p = parse_pane_line(&row).unwrap();
+        assert_eq!(p.agent_session_id, "sid-exact");
     }
 
     #[test]
@@ -619,8 +648,14 @@ mod tests {
             ])
         };
         assert_eq!(detect_agent("node", gemini), AgentKind::from_id("gemini"));
-        assert_eq!(detect_agent("copilot", || None), AgentKind::from_id("copilot"));
-        assert_eq!(detect_agent("cursor-agent", || None), AgentKind::from_id("cursor"));
+        assert_eq!(
+            detect_agent("copilot", || None),
+            AgentKind::from_id("copilot")
+        );
+        assert_eq!(
+            detect_agent("cursor-agent", || None),
+            AgentKind::from_id("cursor")
+        );
     }
 
     #[test]
@@ -638,6 +673,15 @@ mod tests {
             Some(vec!["claude".into(), "--resume".into(), "home".into()])
         );
         assert_eq!(parse_cmdline(b""), None);
+    }
+
+    #[test]
+    fn refresh_states_hydrates_persisted_exact_session_id() {
+        let mut p = pane("%1", "s", "claude", "/same-cwd");
+        p.agent_session_id = "sid-1".into();
+        let mut states = HashMap::new();
+        refresh_states(&mut states, &[p]);
+        assert_eq!(states["%1"].agent_session_id.as_deref(), Some("sid-1"));
     }
 
     #[test]
@@ -888,7 +932,12 @@ mod tests {
         );
         // No cwd match at all: keep the pane the event named.
         assert_eq!(
-            id(resolve_hook_pane(&panes, &states, Some("%2"), Some("/nowhere"))),
+            id(resolve_hook_pane(
+                &panes,
+                &states,
+                Some("%2"),
+                Some("/nowhere")
+            )),
             Some("%2".into())
         );
         // Unknown pane id falls back to cwd; only the agent pane in /b counts.

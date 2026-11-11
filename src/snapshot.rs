@@ -56,6 +56,9 @@ pub struct WindowSnap {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneSnap {
+    /// tmux pane id for this snapshot; disambiguates duplicate cwd/index cases.
+    #[serde(default)]
+    pub id: String,
     pub index: u32,
     pub cwd: String,
     pub active: bool,
@@ -70,6 +73,9 @@ pub struct AgentResume {
     /// `AgentKind::id`.
     pub kind: String,
     pub session_id: Option<String>,
+    /// Exact tmux pane id, persisted as an option so it survives daemon restarts.
+    #[serde(default)]
+    pub pane_id: String,
 }
 
 /// What a restored pane ran before, kept in its `@sessionizer_restore`
@@ -128,6 +134,7 @@ pub fn build(
         let mut agent = state.and_then(|s| s.agent.clone()).map(|kind| AgentResume {
             kind,
             session_id: state.and_then(|s| s.agent_session_id.clone()),
+            pane_id: pane.id.clone(),
         });
         let mut argv = argv(pane).map(|a| redact_argv(&a, redact));
         if argv.is_none()
@@ -137,6 +144,7 @@ pub fn build(
             (argv, agent) = (pending.argv, pending.agent);
         }
         window.panes.push(PaneSnap {
+            id: pane.id.clone(),
             index: pane.pane_index,
             cwd: pane.cwd.clone(),
             active: pane.pane_active,
@@ -536,7 +544,14 @@ fn seed_session_ids(written: &Snapshot, panes: &[Pane], states: &mut HashMap<Str
         let Some(st) = states.get_mut(&pane.id) else {
             continue;
         };
-        if st.agent.is_none() || st.agent_session_id.is_some() {
+        if st.agent.is_none() {
+            continue;
+        }
+        if !pane.agent_session_id.is_empty() {
+            st.agent_session_id = Some(pane.agent_session_id.clone());
+            continue;
+        }
+        if st.agent_session_id.is_some() {
             continue;
         }
         st.agent_session_id = written
@@ -546,7 +561,13 @@ fn seed_session_ids(written: &Snapshot, panes: &[Pane], states: &mut HashMap<Str
             .flat_map(|s| &s.windows)
             .filter(|w| w.id == pane.window_id)
             .flat_map(|w| &w.panes)
-            .find(|p| p.index == pane.pane_index && p.cwd == pane.cwd)
+            .find(|p| {
+                if !p.id.is_empty() {
+                    p.id == pane.id
+                } else {
+                    p.index == pane.pane_index && p.cwd == pane.cwd
+                }
+            })
             .and_then(|p| p.agent.as_ref())
             .filter(|a| st.agent.as_ref() == Some(&a.kind))
             .and_then(|a| a.session_id.clone());
@@ -627,7 +648,10 @@ impl Tracker {
         let base = match &self.prev {
             Some(prev) => Some(prev),
             None if self.first
-                && self.written.as_ref().is_some_and(|w| same_server_as(w.taken_at)) =>
+                && self
+                    .written
+                    .as_ref()
+                    .is_some_and(|w| same_server_as(w.taken_at)) =>
             {
                 self.written.as_ref()
             }
@@ -802,7 +826,8 @@ mod tests {
             p.agent,
             Some(AgentResume {
                 kind: "claude".into(),
-                session_id: Some("abc".into())
+                session_id: Some("abc".into()),
+                pane_id: "%2".into()
             })
         );
         assert_eq!(a.windows[0].panes[0].agent, None);
@@ -842,10 +867,12 @@ mod tests {
         written.sessions[0].windows[0].panes[0].agent = Some(AgentResume {
             kind: "claude".into(),
             session_id: Some("old".into()),
+            pane_id: "%1".into(),
         });
         written.sessions[0].windows[0].panes[1].agent = Some(AgentResume {
             kind: "codex".into(),
             session_id: Some("other-agent".into()),
+            pane_id: "%2".into(),
         });
         seed_session_ids(&written, &panes, &mut states);
         assert_eq!(states["%1"].agent_session_id.as_deref(), Some("old"));
@@ -999,6 +1026,7 @@ mod tests {
         resumed.sessions[0].windows[0].panes[0].agent = Some(AgentResume {
             kind: "claude".into(),
             session_id: Some("new".into()),
+            pane_id: "%1".into(),
         });
         assert_eq!(
             write_action(Some(&one), &resumed, false),

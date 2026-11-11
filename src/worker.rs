@@ -673,6 +673,12 @@ fn worker_loop(
                             d.session_id.as_deref(),
                             now,
                         );
+                        if let Some(st) = pane_states.get(&p.id) {
+                            inventory::persist_agent_session_id(
+                                &p.id,
+                                st.agent_session_id.as_deref(),
+                            );
+                        }
                     }
                     let Some(status) = d.event.status_hint() else {
                         continue;
@@ -692,6 +698,13 @@ fn worker_loop(
         // Pane-level status for every pane on the server (not only `cm__`
         // sessions), published to tmux as window options.
         let now = unix_now();
+        for pane in &panes {
+            if let Some(state) = pane_states.get(&pane.id)
+                && state.agent_session_id.as_deref() != Some(pane.agent_session_id.as_str())
+            {
+                inventory::persist_agent_session_id(&pane.id, state.agent_session_id.as_deref());
+            }
+        }
         inventory::update_statuses(&mut pane_states, &panes, now);
         // Deliver queued messages to agents that are now idle or done — one per
         // pane per tick, so the agent becomes working again and the next message
@@ -896,7 +909,6 @@ fn get_current_branch(project_path: &str) -> Option<String> {
     }
 }
 
-
 /// Advance a session's finished-stability counter and report its status. A
 /// session is only reported `Finished` once it has looked finished (dead pane /
 /// missing agent window) for `threshold` consecutive ticks; until then it
@@ -993,9 +1005,13 @@ fn auto_close_step(
             Some((when, d)) if when.elapsed() < DIRTY_RECHECK => *d,
             _ => {
                 let work_dir = if record.use_worktree {
-                    tmux::worktree_dir(&record.project_name, &record.task_name, &record.session_name)
-                        .to_string_lossy()
-                        .into_owned()
+                    tmux::worktree_dir(
+                        &record.project_name,
+                        &record.task_name,
+                        &record.session_name,
+                    )
+                    .to_string_lossy()
+                    .into_owned()
                 } else {
                     record.project_path.clone()
                 };
@@ -1283,7 +1299,10 @@ mod message_queue_tests {
         q.to_file(&path).unwrap();
 
         // Same server survives a daemon restart.
-        assert_eq!(MessageQueue::from_file(&path, Some(7)).pending()["%1"].len(), 1);
+        assert_eq!(
+            MessageQueue::from_file(&path, Some(7)).pending()["%1"].len(),
+            1
+        );
         // A different server (tmux restarted, pane ids reused) is discarded.
         assert_eq!(MessageQueue::from_file(&path, Some(8)).pending().len(), 0);
         // Unknown current server is discarded.

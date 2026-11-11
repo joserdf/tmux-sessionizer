@@ -256,6 +256,7 @@ mod tests {
             pending_restore: String::new(),
             keep: false,
             title: title.into(),
+            agent_session_id: String::new(),
         }
     }
 

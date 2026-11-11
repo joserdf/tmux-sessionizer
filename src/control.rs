@@ -145,7 +145,11 @@ impl Inventory {
     fn window_token_usage(&self, pane: &Pane) -> Option<crate::usage::TokenUsage> {
         let st = self.state(pane)?;
         let kind = AgentKind::from_id(st.agent.as_deref()?)?;
-        crate::usage::token_usage(kind, st.agent_session_id.as_deref(), Some(pane.cwd.as_str()))
+        crate::usage::token_usage(
+            kind,
+            st.agent_session_id.as_deref(),
+            Some(pane.cwd.as_str()),
+        )
     }
 
     fn window_panes<'a>(&'a self, window_id: &'a str) -> impl Iterator<Item = &'a Pane> {
@@ -201,7 +205,7 @@ impl Inventory {
         };
         let in_session: Vec<&Pane> = self.panes.iter().filter(|p| p.session == session).collect();
         if in_session.is_empty() {
-            bail!("no session {session:?} (see list_sessions)");
+            bail!("no session {session:?} (see sessions_list)");
         }
         let window_id = match window {
             None => in_session
@@ -339,7 +343,7 @@ impl Inventory {
             Some(p) => {
                 let mut v = self.window_json(p, now);
                 v["pane"] = json!(p.id);
-                v["note"] = json!("your own pane: send_message, close and suspend refuse it");
+                v["note"] = json!("your own pane: agent_send, sessions_close and agent_suspend refuse it");
                 v
             }
             None => json!({"in_tmux": false}),
@@ -453,7 +457,7 @@ impl Inventory {
         let options = parse_options(&capture(&t.pane.id, 60)?);
         if options.is_empty() {
             bail!(
-                "no numbered options on screen (OpenCode dialogs are unsupported); use send_keys"
+                "no numbered options on screen (OpenCode dialogs are unsupported); use agent_keys"
             );
         }
         let n = pick(&options)?;
@@ -500,13 +504,24 @@ impl Inventory {
         prompt: Option<&str>,
         category: Option<&str>,
         auto: bool,
+        settings: Option<&str>,
     ) -> Result<Value> {
         check_session_name(name)?;
         if self.panes.iter().any(|p| p.session == name) {
             bail!("session {name:?} exists");
         }
         let cwd = existing_dir(cwd)?;
-        let command = agent_command(agent, &cwd, prompt, auto)?;
+        let command = match (
+            agent_command(agent, &cwd, prompt, auto)?,
+            settings.filter(|s| !s.is_empty()),
+        ) {
+            (Some(cmd), settings) => {
+                let kind = AgentKind::from_id(agent.unwrap_or_default()).unwrap_or_default();
+                Some(crate::tmux::with_settings(kind, cmd, settings, Some(name))?)
+            }
+            (None, Some(_)) => bail!("a settings file needs an agent"),
+            (None, None) => None,
+        };
         if let Some(c) = category.filter(|c| !c.is_empty()) {
             crate::category::validate(c)?;
         }
@@ -537,11 +552,22 @@ impl Inventory {
         agent: Option<&str>,
         prompt: Option<&str>,
         name: Option<&str>,
+        settings: Option<&str>,
     ) -> Result<Value> {
         let base = self.resolve(session.split(':').next().unwrap_or(session))?;
         let session = base.pane.session.as_str();
         let cwd = existing_dir(cwd.unwrap_or(&base.pane.cwd))?;
-        let command = agent_command(agent, &cwd, prompt, true)?;
+        let command = match (
+            agent_command(agent, &cwd, prompt, true)?,
+            settings.filter(|s| !s.is_empty()),
+        ) {
+            (Some(cmd), settings) => {
+                let kind = AgentKind::from_id(agent.unwrap_or_default()).unwrap_or_default();
+                Some(crate::tmux::with_settings(kind, cmd, settings, name)?)
+            }
+            (None, Some(_)) => bail!("a settings file needs an agent"),
+            (None, None) => None,
+        };
         let target = format!("={session}:");
         let mut args = vec![
             "new-window",
@@ -644,6 +670,63 @@ impl Inventory {
             .first()
             .with_context(|| format!("could not close {target}"))?;
         Ok(json!({"closed": target, "reopen_id": id}))
+    }
+
+    /// Replace the exact agent pane with its resume command. The command is
+    /// launched by tmux directly; no input is sent through the pane's TTY.
+    pub fn restart_agent(&self, target: &str, force: bool) -> Result<Value> {
+        let t = self.resolve(target)?;
+        let pane = t.pane;
+        refuse_own(pane)?;
+        let st = self.state(pane).context("no agent state")?;
+        let kind = st
+            .agent
+            .as_deref()
+            .and_then(AgentKind::from_id)
+            .with_context(|| format!("no agent runs in {target}"))?;
+        let id = st.agent_session_id.as_deref().context(
+            "agent session id not known yet (it arrives with the agent's first hook event)",
+        )?;
+        if !force
+            && matches!(
+                st.status,
+                Some(AgentStatus::Working | AgentStatus::Question | AgentStatus::Permission)
+            )
+        {
+            bail!("{target} is busy or waiting; pass force=true to stop it anyway");
+        }
+        crate::tmux::ensure_agent_trust(kind, &pane.cwd);
+        let argv =
+            crate::snapshot::pane_argv(pane).context("cannot determine the agent command")?;
+        let words = crate::restore::resume_command(kind, &argv, Some(id));
+        if words.is_empty() {
+            bail!("resume command is empty");
+        }
+        let command = crate::restore::shell_join(&words);
+        let mut args = vec![
+            "respawn-pane".to_string(),
+            "-k".to_string(),
+            "-t".to_string(),
+            pane.id.clone(),
+            "-c".to_string(),
+            pane.cwd.clone(),
+            words[0].clone(),
+        ];
+        args.extend(words.iter().skip(1).cloned());
+        let out = Command::new("tmux")
+            .args(&args)
+            .output()
+            .context("could not start tmux respawn-pane")?;
+        if !out.status.success() {
+            bail!(
+                "tmux respawn-pane: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(
+            json!({"restarted": pane.id, "session": pane.session, "window_id": pane.window_id,
+            "cwd": pane.cwd, "agent": kind.id(), "agent_session_id": id, "command": command}),
+        )
     }
 
     /// Stop the agent and paste the command that resumes its conversation.
@@ -889,7 +972,10 @@ fn agent_command(
     match agent.filter(|a| !a.is_empty()) {
         Some(a) => {
             let kind = AgentKind::from_id(a).with_context(|| {
-                format!("unknown agent {a:?} (one of {})", AgentKind::ids().join(", "))
+                format!(
+                    "unknown agent {a:?} (one of {})",
+                    AgentKind::ids().join(", ")
+                )
             })?;
             Ok(Some(crate::tmux::build_agent_command_auto(
                 kind, cwd, None, prompt, false, auto,
@@ -1004,7 +1090,10 @@ mod tests {
     #[test]
     fn clean_capture_drops_input_box_and_status_bar() {
         let screen = "⏺ Done, 3 files changed.\n\n● Next step\n───────────────\n❯ \n───────────────\n  ? for shortcuts";
-        assert_eq!(clean_capture(screen), "⏺ Done, 3 files changed.\n\n● Next step");
+        assert_eq!(
+            clean_capture(screen),
+            "⏺ Done, 3 files changed.\n\n● Next step"
+        );
     }
 
     #[test]

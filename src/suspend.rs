@@ -159,8 +159,10 @@ pub fn suspend(
     let agent = AgentResume {
         kind: kind.id().to_string(),
         session_id: Some(session_id.to_string()),
+        pane_id: pane.id.clone(),
     };
     let snap = PaneSnap {
+        id: pane.id.clone(),
         index: pane.pane_index,
         cwd: pane.cwd.clone(),
         active: pane.pane_active,

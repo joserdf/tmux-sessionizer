@@ -116,7 +116,11 @@ On a session, the context menu (`a`) also offers **Send message** (`s`, types
 and submits a reply to the agent), **Approve** (`a`, sends `y` to accept a
 pending permission prompt — only offered while the session is actually waiting
 for one), and **Restart** (`R`, kills and relaunches the session, resuming the
-conversation).
+conversation). The MCP `agent_restart` tool replaces the exact pane process
+with the captured agent command plus its exact resume ID (for Claude,
+`claude --resume <session-id>`); it does not inject terminal keys and preserves
+the pane's working directory and tmux session/window/pane identity. It refuses
+to restart a working or waiting agent unless `force=true`.
 
 Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
 `keybindings.example.toml` in this repo.
@@ -176,7 +180,7 @@ apply.
 
 Agent token usage is read from the transcript (Claude, Codex) and shown per
 window as a compact count (`1.2M tok`), with a dollar cost when the model is
-priced (below). `get_status` reports it as `tokens` and `cost_usd`.
+priced (below). `agent_status` reports it as `tokens` and `cost_usd`.
 
 ## MCP server
 
@@ -198,36 +202,46 @@ For OpenCode, add this to `~/.config/opencode/opencode.json`:
 Targets are `session`, `session:window` (index, name or `@id`) or `%pane`.
 A window resolves to its agent pane.
 
-- **Read:**
-  - `whoami`, `list_sessions(category?, status?)`, `list_windows(session?)`
-  - `get_status(target)`: includes the options of a pending question or permission.
-  - `read_output(target, lines)`, `read_diff(target)`, `list_closed`
-  - `wait_for_status(target, statuses?, timeout?)`
-  - `search_sessions(query)`: ranks windows by the query's words in their names,
+Tools are grouped by name prefix:
+
+- **`sessions_` / `windows_`** (sessions and windows):
+  - `whoami` (the caller's own pane; no prefix)
+  - Read: `sessions_list(category?, status?)`, `windows_list(session?)`,
+    `sessions_search(query)`: ranks windows by the query's words in their names,
     agent title, category, branch, cwd, recent output and the agent's transcript
-    (Claude, Codex).
-  - `list_cards(board?, column?)`: kanban cards across all boards (or one board /
-    column) with id, key, title, priority, labels and url.
-  - `children(session)`: the live sessions forked or spawned from a session.
-  - `collect(session, lines?)`: a worker's status, last output and the commits
-    its worktree has beyond the task branch.
-- **Act:**
-  - `send_message`, `send_keys`, `approve(yes|always|no)`, `answer(choice)`
-  - `create_session`, `create_window`, `rename`, `set_category`
-  - `close` (archived first, so it's reopenable), `reopen(id)`
-  - `suspend` (stop the agent, paste its resume command), `resume`
-  - `move_card(board, id, column)`: move a card between kanban columns.
-  - `dispatch(card?, dry_run?)`: run a dispatch pass, or dispatch one Ready card.
-  - `fork(session)`: fork the session's agent conversation into a new session in
-    the same worktree (Claude, Codex, OpenCode).
-  - `spawn_worker(parent, prompt, agent?)`: start a worker session of the
-    parent's task in its own worktree; `children` and `collect` follow it.
+    (Claude, Codex). `sessions_closed` lists recently closed ones, `windows_diff(target)`
+    shows uncommitted changes.
+  - Act: `sessions_create`, `windows_create`, `sessions_rename`,
+    `sessions_set_category`, `sessions_close` (archived first, so it's reopenable),
+    `sessions_reopen(id)`.
+- **`agent_`** (one agent in a pane):
+  - Read: `agent_status(target)` includes the options of a pending question or
+    permission. `agent_output(target, lines)`, `agent_wait(target, statuses?, timeout?)`.
+  - Act: `agent_send`, `agent_keys`, `agent_approve(yes|always|no)`,
+    `agent_answer(choice)`, `agent_restart`, `agent_suspend` (stop the agent,
+    paste its resume command), `agent_resume`.
+- **`workers_`** (forks and workers):
+  - `workers_fork(session)`: fork the session's agent conversation into a new
+    session in the same worktree (Claude, Codex, OpenCode).
+  - `workers_spawn(parent, prompt, agent?)`: start a worker session of the
+    parent's task in its own worktree.
+  - `workers_children(session)`: the live sessions forked or spawned from a session.
+  - `workers_collect(session, lines?)`: a worker's status, last output and the
+    commits its worktree has beyond the task branch.
+- **`cards_`** (kanban):
+  - `cards_list(board?, column?)`: cards across all boards (or one board / column)
+    with id, key, title, priority, labels and url.
+  - `cards_move(board, id, column)`: move a card between kanban columns.
+  - `cards_dispatch(card?, dry_run?)`: run a dispatch pass, or dispatch one Ready card.
+
+The names changed in this version: MCP clients that call the old names
+(`list_sessions`, `send_message`, …) must switch to the new ones.
 
 Agent statuses come from the daemon. Without the daemon, only which agent runs
 where is known.
 
-The caller's own pane is protected: `send_message`, `send_keys`, `close` and
-`suspend` refuse it. `send_message` to a working agent is queued (delivered
+The caller's own pane is protected: `agent_send`, `agent_keys`, `sessions_close` and
+`agent_suspend` refuse it. `agent_send` to a working agent is queued (delivered
 when the agent next becomes idle or done) unless `force` pastes immediately,
 and `close` needs `confirm: true`. Queued messages survive daemon restarts
 (but not tmux server restarts). Set `[mcp] read_only = true` in
@@ -346,7 +360,7 @@ Cursor Agent and Amp entries were written from their docs and are unverified.
 ### Token usage & pricing
 
 Each session's token usage is read from its transcript and shown per window in
-`showrunner sessions`, the resource panel (CPU/mem/GPU/tokens) and `get_status`:
+`showrunner sessions`, the resource panel (CPU/mem/GPU/tokens) and `agent_status`:
 - **Claude** — summed from the JSONL transcript, deduped by message.
 - **Codex** — the transcript's last cumulative `token_count`.
 - **OpenCode** — the aggregated token columns in its SQLite db (via the

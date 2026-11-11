@@ -34,9 +34,11 @@ Sees and drives the tmux sessions on this machine, including other coding \
 agents (Claude Code, Codex, OpenCode, Pi) running in them. Targets: \
 `session` (its active window), `session:window` (index, name or @id) or \
 `%pane`; a window resolves to its agent pane. Statuses: idle, working, done \
-(finished, unread), error, question, permission. Typical flow: list_sessions \
-or search_sessions, read_output/get_status, send_message, wait_for_status, \
-read_output. Closed windows can be reopened with list_closed + reopen.";
+(finished, unread), error, question, permission. Tools are grouped by prefix: \
+sessions_/windows_ (layout), agent_ (one agent's status, output and input), \
+workers_ (forks and workers), cards_ (kanban). Typical flow: sessions_list or \
+sessions_search, agent_status/agent_output, agent_send, agent_wait, agent_output. \
+Closed windows can be reopened with sessions_closed + sessions_reopen.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ListSessions {
@@ -135,7 +137,9 @@ struct CreateSession {
     name: String,
     #[schemars(description = "Working directory (~ allowed)")]
     cwd: String,
-    #[schemars(description = "Start this agent: claude, codex, pi, opencode, or an agents.toml id (gemini, copilot, cursor, amp, ...)")]
+    #[schemars(
+        description = "Start this agent: claude, codex, pi, opencode, or an agents.toml id (gemini, copilot, cursor, amp, ...)"
+    )]
     agent: Option<String>,
     #[schemars(description = "First prompt for the agent")]
     prompt: Option<String>,
@@ -144,6 +148,10 @@ struct CreateSession {
         description = "OpenCode only: launch with --auto, which allows every permission without asking. Default false: OpenCode stops at permission and question dialogs, and the session shows them as permission/question status"
     )]
     auto: Option<bool>,
+    #[schemars(
+        description = "Claude or OpenCode only: absolute path of a settings file the agent starts with. Claude Code gets `--settings <file>` and follows its permission rules instead of skipping them; OpenCode gets it as OPENCODE_CONFIG on a private server, without --auto"
+    )]
+    settings: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -151,12 +159,18 @@ struct CreateWindow {
     session: String,
     #[schemars(description = "Working directory (default: the session's active window's)")]
     cwd: Option<String>,
-    #[schemars(description = "Start this agent: claude, codex, pi, opencode, or an agents.toml id (gemini, copilot, cursor, amp, ...)")]
+    #[schemars(
+        description = "Start this agent: claude, codex, pi, opencode, or an agents.toml id (gemini, copilot, cursor, amp, ...)"
+    )]
     agent: Option<String>,
     #[schemars(description = "First prompt for the agent")]
     prompt: Option<String>,
     #[schemars(description = "Window name (default: named automatically)")]
     name: Option<String>,
+    #[schemars(
+        description = "Claude or OpenCode only: absolute path of a settings file the agent starts with. Claude Code gets `--settings <file>` and follows its permission rules instead of skipping them; OpenCode gets it as OPENCODE_CONFIG on a private server, without --auto"
+    )]
+    settings: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -201,6 +215,14 @@ struct Suspend {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct RestartAgent {
+    #[schemars(description = "session, session:window or %pane")]
+    target: String,
+    #[schemars(description = "Restart even while working or waiting")]
+    force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct Fork {
     #[schemars(description = "tmux session name of the session to fork")]
     session: String,
@@ -212,8 +234,14 @@ struct SpawnWorker {
     parent: String,
     #[schemars(description = "First prompt for the worker's agent")]
     prompt: String,
-    #[schemars(description = "Agent id: claude, codex, pi, opencode or an agents.toml id (default: the parent's agent)")]
+    #[schemars(
+        description = "Agent id: claude, codex, pi, opencode or an agents.toml id (default: the parent's agent)"
+    )]
     agent: Option<String>,
+    #[schemars(
+        description = "Claude or OpenCode only: absolute path of a settings file the agent starts with. Claude Code gets `--settings <file>` and follows its permission rules instead of skipping them; OpenCode gets it as OPENCODE_CONFIG on a private server, without --auto"
+    )]
+    settings: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -411,7 +439,7 @@ impl Server {
         description = "Sessions with their category and windows (agent, status, idle seconds)",
         annotations(read_only_hint = true)
     )]
-    async fn list_sessions(&self, Parameters(p): Parameters<ListSessions>) -> Out {
+    async fn sessions_list(&self, Parameters(p): Parameters<ListSessions>) -> Out {
         with_inventory(move |inv, _| {
             Ok(inv.list_sessions(p.category.as_deref(), p.status.as_deref(), control::now()))
         })
@@ -422,7 +450,7 @@ impl Server {
         description = "Windows (all, or one session's) with target, cwd, agent, status, agent session id and title",
         annotations(read_only_hint = true)
     )]
-    async fn list_windows(&self, Parameters(p): Parameters<ListWindows>) -> Out {
+    async fn windows_list(&self, Parameters(p): Parameters<ListWindows>) -> Out {
         with_inventory(move |inv, _| inv.list_windows(p.session.as_deref(), control::now())).await
     }
 
@@ -430,7 +458,7 @@ impl Server {
         description = "One window's details: agent, status, branch, last hook event, last assistant text message, and the options of a pending question or permission",
         annotations(read_only_hint = true)
     )]
-    async fn get_status(&self, Parameters(p): Parameters<TargetArg>) -> Out {
+    async fn agent_status(&self, Parameters(p): Parameters<TargetArg>) -> Out {
         with_inventory(move |inv, cfg| inv.get_status(&p.target, control::now(), cfg)).await
     }
 
@@ -438,7 +466,7 @@ impl Server {
         description = "The last lines of a pane's conversation as plain text, without the TUI chrome (input box, status bar, borders). Pass raw=true for the full screen",
         annotations(read_only_hint = true)
     )]
-    async fn read_output(&self, Parameters(p): Parameters<ReadOutput>) -> Out {
+    async fn agent_output(&self, Parameters(p): Parameters<ReadOutput>) -> Out {
         with_inventory(move |inv, _| {
             inv.read_output(&p.target, p.lines.unwrap_or(80), p.raw.unwrap_or(false))
         })
@@ -449,7 +477,7 @@ impl Server {
         description = "Wait until a window's agent reaches one of the given statuses (default: anything but working), then return its status",
         annotations(read_only_hint = true)
     )]
-    async fn wait_for_status(&self, Parameters(p): Parameters<WaitForStatus>) -> Out {
+    async fn agent_wait(&self, Parameters(p): Parameters<WaitForStatus>) -> Out {
         let wanted: Vec<String> = p
             .statuses
             .unwrap_or_else(|| DONE_STATUSES.iter().map(|s| s.to_string()).collect());
@@ -485,7 +513,7 @@ impl Server {
         description = "Recently closed sessions and windows (kept 7 days), with the ids reopen takes",
         annotations(read_only_hint = true)
     )]
-    async fn list_closed(&self) -> Out {
+    async fn sessions_closed(&self) -> Out {
         with_inventory(|_, _| Ok(control::list_closed(control::now()))).await
     }
 
@@ -493,7 +521,7 @@ impl Server {
         description = "Uncommitted changes (git diff HEAD plus untracked files) in a window's working directory",
         annotations(read_only_hint = true)
     )]
-    async fn read_diff(&self, Parameters(p): Parameters<TargetArg>) -> Out {
+    async fn windows_diff(&self, Parameters(p): Parameters<TargetArg>) -> Out {
         with_inventory(move |inv, _| inv.read_diff(&p.target)).await
     }
 
@@ -501,7 +529,7 @@ impl Server {
         description = "Find windows by topic: ranks every window by the query's words in its names, agent title, category, branch, cwd, recent output and agent transcript (Claude, Codex). Try several phrasings or synonyms for semantic search",
         annotations(read_only_hint = true)
     )]
-    async fn search_sessions(&self, Parameters(p): Parameters<SearchSessions>) -> Out {
+    async fn sessions_search(&self, Parameters(p): Parameters<SearchSessions>) -> Out {
         with_inventory(move |inv, _| {
             Ok(crate::search::search(
                 inv,
@@ -516,7 +544,7 @@ impl Server {
     #[tool(
         description = "Paste text into a pane and press Enter (e.g. a prompt for its agent). Refuses the caller's own pane; a working agent is queued (delivered when it next becomes idle or done) unless force"
     )]
-    async fn send_message(&self, Parameters(p): Parameters<SendMessage>) -> Out {
+    async fn agent_send(&self, Parameters(p): Parameters<SendMessage>) -> Out {
         self.act(move |inv, _| {
             inv.send_message(
                 &p.target,
@@ -529,7 +557,7 @@ impl Server {
     }
 
     #[tool(description = "Send tmux keys to a pane (Escape, C-c, Up, Enter, ...)")]
-    async fn send_keys(&self, Parameters(p): Parameters<SendKeys>) -> Out {
+    async fn agent_keys(&self, Parameters(p): Parameters<SendKeys>) -> Out {
         self.act(move |inv, _| inv.send_keys(&p.target, &p.keys))
             .await
     }
@@ -537,7 +565,7 @@ impl Server {
     #[tool(
         description = "Answer an agent's permission prompt: yes, always or no. Returns the screen after"
     )]
-    async fn approve(&self, Parameters(p): Parameters<Approve>) -> Out {
+    async fn agent_approve(&self, Parameters(p): Parameters<Approve>) -> Out {
         self.act(move |inv, _| inv.approve(&p.target, &p.decision))
             .await
     }
@@ -545,13 +573,13 @@ impl Server {
     #[tool(
         description = "Pick an option of an agent's question (by number or label; see get_status). Returns the screen after"
     )]
-    async fn answer(&self, Parameters(p): Parameters<Answer>) -> Out {
+    async fn agent_answer(&self, Parameters(p): Parameters<Answer>) -> Out {
         self.act(move |inv, _| inv.answer(&p.target, &p.choice))
             .await
     }
 
     #[tool(description = "Create a tmux session, optionally starting an agent with a first prompt")]
-    async fn create_session(&self, Parameters(p): Parameters<CreateSession>) -> Out {
+    async fn sessions_create(&self, Parameters(p): Parameters<CreateSession>) -> Out {
         self.act(move |inv, _| {
             inv.create_session(
                 &p.name,
@@ -560,6 +588,7 @@ impl Server {
                 p.prompt.as_deref(),
                 p.category.as_deref(),
                 p.auto.unwrap_or(false),
+                p.settings.as_deref(),
             )
         })
         .await
@@ -568,7 +597,7 @@ impl Server {
     #[tool(
         description = "Add a window to a session, optionally starting an agent with a first prompt"
     )]
-    async fn create_window(&self, Parameters(p): Parameters<CreateWindow>) -> Out {
+    async fn windows_create(&self, Parameters(p): Parameters<CreateWindow>) -> Out {
         self.act(move |inv, _| {
             inv.create_window(
                 &p.session,
@@ -576,6 +605,7 @@ impl Server {
                 p.agent.as_deref(),
                 p.prompt.as_deref(),
                 p.name.as_deref(),
+                p.settings.as_deref(),
             )
         })
         .await
@@ -584,12 +614,12 @@ impl Server {
     #[tool(
         description = "Rename a session (bare session target) or a window (auto-naming then leaves it)"
     )]
-    async fn rename(&self, Parameters(p): Parameters<Rename>) -> Out {
+    async fn sessions_rename(&self, Parameters(p): Parameters<Rename>) -> Out {
         self.act(move |inv, _| inv.rename(&p.target, &p.name)).await
     }
 
     #[tool(description = "Set or clear a session's category")]
-    async fn set_category(&self, Parameters(p): Parameters<SetCategory>) -> Out {
+    async fn sessions_set_category(&self, Parameters(p): Parameters<SetCategory>) -> Out {
         self.act(move |inv, _| inv.set_category(&p.target, p.category.as_deref()))
             .await
     }
@@ -598,21 +628,30 @@ impl Server {
         description = "Close a session or window. It is archived first: reopen brings it back with its agent's resume command. Refuses the caller's own window",
         annotations(destructive_hint = true)
     )]
-    async fn close(&self, Parameters(p): Parameters<Close>) -> Out {
+    async fn sessions_close(&self, Parameters(p): Parameters<Close>) -> Out {
         self.act(move |inv, cfg| inv.close(cfg, &p.target, p.confirm, control::now()))
             .await
     }
 
     #[tool(description = "Reopen a closed session or window by its list_closed id")]
-    async fn reopen(&self, Parameters(p): Parameters<Reopen>) -> Out {
+    async fn sessions_reopen(&self, Parameters(p): Parameters<Reopen>) -> Out {
         self.act(move |_, cfg| control::reopen(cfg, p.id)).await
+    }
+
+    #[tool(
+        description = "Restart the agent in its existing pane by replacing its process with the exact-session resume command; preserves cwd and tmux identity, does not send keys. Refuses busy agents unless force",
+        annotations(destructive_hint = true)
+    )]
+    async fn agent_restart(&self, Parameters(p): Parameters<RestartAgent>) -> Out {
+        self.act(move |inv, _| inv.restart_agent(&p.target, p.force.unwrap_or(false)))
+            .await
     }
 
     #[tool(
         description = "Stop a window's agent and paste (not run) the command that resumes its conversation; the window stays. Refuses busy agents unless force",
         annotations(destructive_hint = true)
     )]
-    async fn suspend(&self, Parameters(p): Parameters<Suspend>) -> Out {
+    async fn agent_suspend(&self, Parameters(p): Parameters<Suspend>) -> Out {
         self.act(move |inv, cfg| inv.suspend(cfg, &p.target, p.force.unwrap_or(false)))
             .await
     }
@@ -620,9 +659,10 @@ impl Server {
     #[tool(
         description = "Fork a session's agent conversation into a new tmux session in the same worktree (Claude, Codex, OpenCode). The new session records the source as its parent"
     )]
-    async fn fork(&self, Parameters(p): Parameters<Fork>) -> Out {
+    async fn workers_fork(&self, Parameters(p): Parameters<Fork>) -> Out {
         self.act(move |_, _| {
-            crate::ops::fork_session(&p.session).map(|n| json!({ "forked": n, "parent": p.session }))
+            crate::ops::fork_session(&p.session)
+                .map(|n| json!({ "forked": n, "parent": p.session }))
         })
         .await
     }
@@ -630,9 +670,10 @@ impl Server {
     #[tool(
         description = "Spawn a worker under a task session: a new session of the same task in its own worktree (branch off the task branch), started with a prompt. Track it with children and collect"
     )]
-    async fn spawn_worker(&self, Parameters(p): Parameters<SpawnWorker>) -> Out {
+    async fn workers_spawn(&self, Parameters(p): Parameters<SpawnWorker>) -> Out {
         self.act(move |_, cfg| {
-            let worker = crate::ops::spawn_worker(cfg, &p.parent, &p.prompt, p.agent.as_deref())?;
+            let worker =
+                crate::ops::spawn_worker(cfg, &p.parent, &p.prompt, p.agent.as_deref(), p.settings.as_deref())?;
             Ok(json!({ "worker": worker, "parent": p.parent }))
         })
         .await
@@ -642,7 +683,7 @@ impl Server {
         description = "The live sessions forked or spawned from a session, with agent, branch and status",
         annotations(read_only_hint = true)
     )]
-    async fn children(&self, Parameters(p): Parameters<SessionArg>) -> Out {
+    async fn workers_children(&self, Parameters(p): Parameters<SessionArg>) -> Out {
         with_config(move |_| {
             let sessions = crate::config::load_sessions();
             let rows: Vec<Value> = crate::ops::children_of(&sessions, &p.session)
@@ -667,11 +708,13 @@ impl Server {
         description = "A worker's result: its status, last output lines, and the commits its worktree has beyond the task branch",
         annotations(read_only_hint = true)
     )]
-    async fn collect(&self, Parameters(p): Parameters<Collect>) -> Out {
+    async fn workers_collect(&self, Parameters(p): Parameters<Collect>) -> Out {
         with_inventory(move |inv, _| {
             let record = crate::config::load_sessions()
                 .remove(&p.session)
-                .ok_or_else(|| anyhow::anyhow!("'{}' is not a showrunner task session", p.session))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("'{}' is not a showrunner task session", p.session)
+                })?;
             let mut v = inv.read_output(&p.session, p.lines.unwrap_or(40), false)?;
             let cwd = inv.resolve(&p.session)?.pane.cwd.clone();
             v["session"] = json!(p.session);
@@ -682,7 +725,7 @@ impl Server {
     }
 
     #[tool(description = "Run the resume command suspend (or a restore) pasted in a window")]
-    async fn resume(&self, Parameters(p): Parameters<TargetArg>) -> Out {
+    async fn agent_resume(&self, Parameters(p): Parameters<TargetArg>) -> Out {
         self.act(move |inv, _| inv.resume(&p.target)).await
     }
 
@@ -690,7 +733,7 @@ impl Server {
         description = "Kanban cards across all boards (or one board / column): id, key, title, column, priority, labels and url",
         annotations(read_only_hint = true)
     )]
-    async fn list_cards(&self, Parameters(p): Parameters<ListCards>) -> Out {
+    async fn cards_list(&self, Parameters(p): Parameters<ListCards>) -> Out {
         with_config(move |cfg| {
             let boards = crate::tasks::dispatch::board_cards(cfg)?;
             cards_json(boards, p.board.as_deref(), p.column.as_deref())
@@ -698,8 +741,10 @@ impl Server {
         .await
     }
 
-    #[tool(description = "Move a card to another column on a board (backlog, ready, running, needs_you, review or done)")]
-    async fn move_card(&self, Parameters(p): Parameters<MoveCard>) -> Out {
+    #[tool(
+        description = "Move a card to another column on a board (backlog, ready, running, needs_you, review or done)"
+    )]
+    async fn cards_move(&self, Parameters(p): Parameters<MoveCard>) -> Out {
         if self.read_only {
             return Err("showrunner MCP is read-only ([mcp] read_only = true)".into());
         }
@@ -714,8 +759,7 @@ impl Server {
             // dispatcher write isn't clobbered.
             let mut result = Ok(());
             Config::modify(|cfg| {
-                let Some(board) = cfg.boards.iter().find(|b| b.name == board_name).cloned()
-                else {
+                let Some(board) = cfg.boards.iter().find(|b| b.name == board_name).cloned() else {
                     result = Err(anyhow::anyhow!("board '{board_name}' not found"));
                     return;
                 };
@@ -736,8 +780,10 @@ impl Server {
         }
     }
 
-    #[tool(description = "Run one dispatch pass, or dispatch a single Ready card (by id or key). Returns a summary of what was / would be dispatched")]
-    async fn dispatch(&self, Parameters(p): Parameters<DispatchCards>) -> Out {
+    #[tool(
+        description = "Run one dispatch pass, or dispatch a single Ready card (by id or key). Returns a summary of what was / would be dispatched"
+    )]
+    async fn cards_dispatch(&self, Parameters(p): Parameters<DispatchCards>) -> Out {
         if self.read_only {
             return Err("showrunner MCP is read-only ([mcp] read_only = true)".into());
         }
@@ -804,7 +850,10 @@ mod tests {
         vec![
             crate::tasks::dispatch::BoardCards {
                 name: "alpha".into(),
-                cards: vec![card("a1", Column::Ready, Some(3)), card("a2", Column::Done, None)],
+                cards: vec![
+                    card("a1", Column::Ready, Some(3)),
+                    card("a2", Column::Done, None),
+                ],
             },
             crate::tasks::dispatch::BoardCards {
                 name: "beta".into(),

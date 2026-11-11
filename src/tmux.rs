@@ -325,6 +325,40 @@ pub fn create_session(
     startup_skills: &[String],
     agent: AgentKind,
 ) -> Result<String> {
+    create_session_with(
+        project_name,
+        project_path,
+        task_name,
+        task_branch,
+        session_name,
+        use_worktree,
+        copy_patterns,
+        setup_commands,
+        initial_prompt,
+        startup_skills,
+        agent,
+        None,
+    )
+}
+
+/// [`create_session`] whose agent starts with a settings file (see [`with_settings`]).
+#[allow(clippy::too_many_arguments)]
+pub fn create_session_with(
+    project_name: &str,
+    project_path: &str,
+    task_name: &str,
+    task_branch: &str,
+    session_name: &str,
+    use_worktree: bool,
+    copy_patterns: &[String],
+    setup_commands: &[String],
+    initial_prompt: Option<&str>,
+    startup_skills: &[String],
+    agent: AgentKind,
+    settings: Option<&str>,
+) -> Result<String> {
+    // Checked before any worktree is made, so a bad path leaves nothing behind
+    with_settings(agent, String::new(), settings, None)?;
     let tmux_name = build_tmux_name(project_name, task_name, session_name);
 
     let work_dir;
@@ -406,13 +440,18 @@ pub fn create_session(
         is_main_session(session_name),
     );
 
-    let agent_cmd = build_agent_command(
+    let agent_cmd = with_settings(
         agent,
-        &work_dir,
-        Some(&system_prompt),
-        build_initial_prompt(startup_skills, initial_prompt, agent).as_deref(),
-        false,
-    );
+        build_agent_command(
+            agent,
+            &work_dir,
+            Some(&system_prompt),
+            build_initial_prompt(startup_skills, initial_prompt, agent).as_deref(),
+            false,
+        ),
+        settings,
+        Some(&tmux_name),
+    )?;
 
     let output = Command::new("tmux")
         .args([
@@ -1174,6 +1213,62 @@ pub fn session_agent(session_name: &str) -> AgentKind {
         .unwrap_or_default()
 }
 
+/// Rewrite a launch command so the agent starts with a settings file instead
+/// of auto-approving. Claude Code gets `--settings <file>` and follows that
+/// file's permission rules; OpenCode gets it as `OPENCODE_CONFIG` on a private
+/// server, without `--auto`. `name` (when given) is passed to Claude as
+/// `--name` so the session is titled after the tmux session, not the settings
+/// file's agent. An empty `cmd` only validates `settings`; any other launch
+/// shape is refused so its arguments are never silently dropped.
+pub(crate) fn with_settings(
+    agent: AgentKind,
+    cmd: String,
+    settings: Option<&str>,
+    name: Option<&str>,
+) -> Result<String> {
+    let Some(path) = settings.filter(|s| !s.is_empty()) else {
+        return Ok(cmd);
+    };
+    if !path.starts_with('/') || !Path::new(path).is_file() {
+        bail!("settings must be the absolute path of an existing file: {path:?}");
+    }
+    let rest_after = |prefix: &str| -> Result<&str> {
+        match cmd.strip_prefix(prefix) {
+            Some(rest) => Ok(rest),
+            None if cmd.is_empty() => Ok(""),
+            None => bail!(
+                "unexpected {} launch, cannot add a settings file: {cmd:?}",
+                agent.id()
+            ),
+        }
+    };
+    match agent {
+        AgentKind::Claude => {
+            let rest = rest_after("claude --dangerously-skip-permissions")?;
+            let name = name
+                .filter(|n| !n.is_empty())
+                .map(|n| format!(" --name {}", shell_escape(n)))
+                .unwrap_or_default();
+            Ok(format!(
+                "claude --settings {}{name}{rest}",
+                shell_escape(path)
+            ))
+        }
+        AgentKind::OpenCode => {
+            let rest = rest_after("opencode")?;
+            let rest = rest.strip_prefix(" --auto").unwrap_or(rest);
+            Ok(format!(
+                "OPENCODE_CONFIG={} opencode --standalone{rest}",
+                shell_escape(path)
+            ))
+        }
+        _ => bail!(
+            "a settings file works only with claude and opencode, not {}",
+            agent.id()
+        ),
+    }
+}
+
 /// Assemble the shell command that launches (or resumes) the agent for a
 /// session. `system_prompt` is the session-context briefing — present for task
 /// sessions, absent for adhoc ones; for Claude it also implies loading the
@@ -1203,6 +1298,9 @@ pub(crate) fn build_agent_command_auto(
 ) -> String {
     match agent {
         AgentKind::Claude => {
+            // Claude's folder-trust dialog blocks a fresh session until it is
+            // accepted, so record the trust here, as the Codex arm does below.
+            ensure_claude_trust(work_dir);
             let mut cmd = String::from("claude --dangerously-skip-permissions");
             if resume {
                 cmd.push_str(" --continue");
@@ -1334,6 +1432,70 @@ fn ensure_codex_trust(work_dir: &str) {
     }
     updated.push_str(&format!("\n{header}\ntrust_level = \"trusted\"\n"));
     let _ = fs::write(&config_path, updated);
+}
+
+/// Record `work_dir` as trusted before an agent starts there, so its folder
+/// trust dialog never stalls the session. Codex and Claude keep the decision
+/// in their own config; the other agents accept it through launch flags.
+pub(crate) fn ensure_agent_trust(agent: AgentKind, work_dir: &str) {
+    match agent {
+        AgentKind::Claude => ensure_claude_trust(work_dir),
+        AgentKind::Codex => ensure_codex_trust(work_dir),
+        _ => {}
+    }
+}
+
+/// Mark `work_dir` trusted in `~/.claude.json` (`projects.<dir>.hasTrustDialogAccepted`).
+fn ensure_claude_trust(work_dir: &str) {
+    if let Some(home) = dirs::home_dir() {
+        ensure_claude_trust_at(&home.join(".claude.json"), work_dir);
+    }
+}
+
+/// [`ensure_claude_trust`] for an explicit config file. Only an existing,
+/// parseable file is changed, so Claude's own first-run setup is left alone.
+/// The new content goes to a temp file that is renamed over the config, so a
+/// reader never sees a half-written file.
+fn ensure_claude_trust_at(config_path: &Path, work_dir: &str) {
+    let Ok(content) = fs::read_to_string(config_path) else {
+        return;
+    };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+    let Some(projects) = root
+        .as_object_mut()
+        .map(|o| o.entry("projects").or_insert_with(|| serde_json::json!({})))
+        .and_then(|p| p.as_object_mut())
+    else {
+        return;
+    };
+    let Some(project) = projects
+        .entry(work_dir)
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    else {
+        return;
+    };
+    if project.get("hasTrustDialogAccepted") == Some(&serde_json::Value::Bool(true)) {
+        return;
+    }
+    project.insert(
+        "hasTrustDialogAccepted".into(),
+        serde_json::Value::Bool(true),
+    );
+    let Ok(text) = serde_json::to_string_pretty(&root) else {
+        return;
+    };
+    let mut tmp = config_path.as_os_str().to_owned();
+    tmp.push(".sessionizer-tmp");
+    let tmp = PathBuf::from(tmp);
+    if fs::write(&tmp, text).is_ok() {
+        if let Ok(meta) = fs::metadata(config_path) {
+            let _ = fs::set_permissions(&tmp, meta.permissions());
+        }
+        let _ = fs::rename(&tmp, config_path);
+    }
 }
 
 /// The top-level `notify` line to add to a codex config, pointing at `script`.
@@ -2859,6 +3021,107 @@ pub fn cleanup_project_dirs(project_name: &str) {
 mod tests {
     use super::*;
 
+    // --- with_settings ---
+
+    struct SettingsFile(PathBuf);
+    impl Drop for SettingsFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn settings_file() -> (SettingsFile, String) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "showrunner-settings-{}-{nanos}.json",
+            std::process::id()
+        ));
+        fs::write(&path, "{}").unwrap();
+        let text = path.to_string_lossy().into_owned();
+        (SettingsFile(path), text)
+    }
+
+    #[test]
+    fn with_settings_leaves_the_command_alone_without_a_file() {
+        let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
+        assert_eq!(
+            with_settings(AgentKind::Claude, cmd.clone(), None, None).unwrap(),
+            cmd
+        );
+        assert_eq!(
+            with_settings(AgentKind::Claude, cmd.clone(), Some(""), None).unwrap(),
+            cmd
+        );
+    }
+
+    #[test]
+    fn with_settings_drops_auto_approve_for_claude() {
+        let (_dir, path) = settings_file();
+        let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
+        let out = with_settings(AgentKind::Claude, cmd, Some(&path), None).unwrap();
+        assert_eq!(
+            out,
+            format!("claude --settings {} 'hi'", shell_escape(&path))
+        );
+    }
+
+    #[test]
+    fn with_settings_names_the_claude_session() {
+        let (_dir, path) = settings_file();
+        let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
+        let out = with_settings(AgentKind::Claude, cmd, Some(&path), Some("coordinator")).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "claude --settings {} --name 'coordinator' 'hi'",
+                shell_escape(&path)
+            )
+        );
+    }
+
+    #[test]
+    fn with_settings_runs_opencode_standalone_without_auto() {
+        let (_dir, path) = settings_file();
+        let out = with_settings(
+            AgentKind::OpenCode,
+            "opencode --auto --prompt 'hi'".to_string(),
+            Some(&path),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "OPENCODE_CONFIG={} opencode --standalone --prompt 'hi'",
+                shell_escape(&path)
+            )
+        );
+    }
+
+    #[test]
+    fn with_settings_refuses_missing_relative_or_unsupported() {
+        let (_dir, path) = settings_file();
+        assert!(
+            with_settings(AgentKind::Claude, String::new(), Some("worker.settings.json"), None)
+                .is_err()
+        );
+        assert!(
+            with_settings(AgentKind::Claude, String::new(), Some("/nowhere/x.json"), None).is_err()
+        );
+        assert!(
+            with_settings(AgentKind::Codex, "codex".to_string(), Some(&path), None).is_err()
+        );
+        // A launch in another shape would lose its arguments, so it is refused; empty only validates
+        assert!(
+            with_settings(AgentKind::Claude, "claude --continue 'hi'".to_string(), Some(&path), None)
+                .is_err()
+        );
+        assert!(with_settings(AgentKind::Claude, String::new(), Some(&path), None).is_ok());
+    }
+
     // --- build_agent_command_auto (OpenCode --auto) ---
 
     #[test]
@@ -3209,6 +3472,41 @@ mod tests {
                     2. Yes, allow all edits during this session\n  \
                     3. No, and tell Claude what to do differently";
         assert!(detect_attention_dialog(pane, AgentKind::Claude));
+    }
+
+    #[test]
+    fn claude_trust_is_recorded_and_other_keys_survive() {
+        let dir = std::env::temp_dir().join(format!("sessionizer-trust-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".claude.json");
+        fs::write(
+            &path,
+            r#"{"numStartups":3,"projects":{"/a":{"hasTrustDialogAccepted":false,"allowedTools":["x"]}}}"#,
+        )
+        .unwrap();
+        ensure_claude_trust_at(&path, "/w");
+        ensure_claude_trust_at(&path, "/a");
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["numStartups"], 3);
+        assert_eq!(v["projects"]["/w"]["hasTrustDialogAccepted"], true);
+        assert_eq!(v["projects"]["/a"]["hasTrustDialogAccepted"], true);
+        assert_eq!(v["projects"]["/a"]["allowedTools"][0], "x");
+        assert!(!dir.join(".claude.json.sessionizer-tmp").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn claude_trust_leaves_missing_or_invalid_config_alone() {
+        let dir = std::env::temp_dir().join(format!("sessionizer-trust-bad-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing.json");
+        ensure_claude_trust_at(&missing, "/w");
+        assert!(!missing.exists());
+        let broken = dir.join("broken.json");
+        fs::write(&broken, "{not json").unwrap();
+        ensure_claude_trust_at(&broken, "/w");
+        assert_eq!(fs::read_to_string(&broken).unwrap(), "{not json");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

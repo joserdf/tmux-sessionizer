@@ -111,7 +111,11 @@ fn is_runtime(arg0: &str) -> bool {
 pub fn resume_command(kind: AgentKind, argv: &[String], session_id: Option<&str>) -> Vec<String> {
     // A TOML agent resumes its latest conversation in the cwd, if it can.
     if let Some(def) = kind.def() {
-        return if def.resume.is_empty() { argv.to_vec() } else { def.resume.clone() };
+        return if def.resume.is_empty() {
+            argv.to_vec()
+        } else {
+            def.resume.clone()
+        };
     }
     let (Some(id), false) = (session_id, kind == AgentKind::Pi || argv.is_empty()) else {
         return argv.to_vec();
@@ -355,6 +359,11 @@ fn fill_window(w: &WindowSnap, first: String, run_agents: bool, pastes: &mut Vec
             let _ = tmux(&["select-pane", "-t", id]);
         }
         if let Some((text, agent)) = pane_command(snap) {
+            // The resume command is pasted and run later: trust must already be
+            // recorded when the user runs it.
+            if let Some(kind) = snap.agent.as_ref().and_then(|a| AgentKind::from_id(&a.kind)) {
+                crate::tmux::ensure_agent_trust(kind, &snap.cwd);
+            }
             let pending = snapshot::Pending {
                 argv: snap.argv.clone(),
                 agent: snap.agent.clone(),
@@ -702,7 +711,10 @@ mod tests {
                 "claude --dangerously-skip-permissions prompt",
                 "claude --dangerously-skip-permissions --resume ID --fork-session",
             ),
-            ("node /x/cli.js --model m", "node /x/cli.js --model m --resume ID --fork-session"),
+            (
+                "node /x/cli.js --model m",
+                "node /x/cli.js --model m --resume ID --fork-session",
+            ),
         ];
         for (argv, want) in cases {
             assert_eq!(
@@ -757,6 +769,7 @@ mod tests {
     #[test]
     fn pane_command_quotes_and_flags_agents() {
         let shell = PaneSnap {
+            id: String::new(),
             index: 0,
             cwd: "/".into(),
             active: true,
@@ -779,6 +792,7 @@ mod tests {
             agent: Some(AgentResume {
                 kind: "claude".into(),
                 session_id: Some("abc-1".into()),
+                pane_id: String::new(),
             }),
             ..shell
         };
