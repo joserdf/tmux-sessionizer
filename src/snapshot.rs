@@ -10,6 +10,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -456,6 +457,45 @@ fn write_action(written: Option<&Snapshot>, cur: &Snapshot, first: bool) -> Writ
     }
 }
 
+/// Set by the SIGTERM handler; the worker saves a final snapshot and exits.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+pub fn request_stop() {
+    STOP.store(true, Ordering::SeqCst);
+}
+
+pub fn stop_requested() -> bool {
+    STOP.load(Ordering::SeqCst)
+}
+
+/// Whether the running tmux server started at or before `taken_at`, i.e. it
+/// is the server the snapshot describes (not one started after a reboot).
+fn same_server_as(taken_at: u64) -> bool {
+    Command::new("tmux")
+        .args(["display-message", "-p", "#{start_time}"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .is_some_and(|start| start <= taken_at)
+}
+
+/// Add what closed between `prev` and `cur` to the closed history, unless a
+/// recent entry already covers it.
+fn record_closures(prev: &Snapshot, cur: &Snapshot, now: u64) {
+    let closed = closed_between(prev, cur);
+    if closed.is_empty() {
+        return;
+    }
+    let mut history = load_closed();
+    let closed = not_yet_recorded(closed, &history, now);
+    if !closed.is_empty() {
+        record_closed(&mut history, closed, CloseReason::Manual, now);
+        let _ = save_closed(&history);
+    }
+}
+
 /// A snapshot taken now, outside the tracker (the MCP server's `close`).
 pub fn take(
     panes: &[Pane],
@@ -580,16 +620,21 @@ impl Tracker {
             }
         }
         let cur = build(panes, states, &self.env, pane_argv, redact, now);
-        if let Some(prev) = &self.prev {
-            let closed = closed_between(prev, &cur);
-            if !closed.is_empty() {
-                let mut history = load_closed();
-                let closed = not_yet_recorded(closed, &history, now);
-                if !closed.is_empty() {
-                    record_closed(&mut history, closed, CloseReason::Manual, now);
-                    let _ = save_closed(&history);
-                }
+        // Before this daemon's first tick, the previous state is the written
+        // snapshot, if the same tmux server still runs: a session that vanished
+        // while the daemon was down was closed and must not come back at the
+        // next restore.
+        let base = match &self.prev {
+            Some(prev) => Some(prev),
+            None if self.first
+                && self.written.as_ref().is_some_and(|w| same_server_as(w.taken_at)) =>
+            {
+                self.written.as_ref()
             }
+            None => None,
+        };
+        if let Some(prev) = base {
+            record_closures(prev, &cur, now);
         }
         let action = write_action(self.written.as_ref(), &cur, self.first);
         if action != WriteAction::Skip && save(&cur, action == WriteAction::Rotate).is_ok() {
@@ -597,6 +642,28 @@ impl Tracker {
             self.first = false;
         }
         self.prev = Some(cur);
+    }
+
+    /// Save the current state when the daemon stops, outside the tick cadence,
+    /// and record what closed since the last tick. Skipped without panes, so
+    /// an empty server (a reboot in progress) never overwrites the snapshot.
+    pub fn flush(
+        &mut self,
+        panes: &[Pane],
+        states: &mut HashMap<String, PaneState>,
+        redact: &[String],
+        now: u64,
+    ) {
+        if panes.is_empty() || restoring() {
+            return;
+        }
+        let cur = build(panes, states, &self.env, pane_argv, redact, now);
+        if let Some(prev) = &self.prev {
+            record_closures(prev, &cur, now);
+        }
+        if save(&cur, false).is_ok() {
+            self.written = Some(cur);
+        }
     }
 
     /// Close `targets`, archived first (see [`archive_and_close`]) from the

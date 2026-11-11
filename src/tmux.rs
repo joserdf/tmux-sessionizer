@@ -312,6 +312,7 @@ pub fn create_task_branch(project_path: &str, branch_name: &str, base: Option<&s
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_session(
     project_name: &str,
     project_path: &str,
@@ -325,6 +326,40 @@ pub fn create_session(
     startup_skills: &[String],
     agent: AgentKind,
 ) -> Result<String> {
+    create_session_with(
+        project_name,
+        project_path,
+        task_name,
+        task_branch,
+        session_name,
+        use_worktree,
+        copy_patterns,
+        setup_commands,
+        initial_prompt,
+        startup_skills,
+        agent,
+        None,
+    )
+}
+
+/// [`create_session`] whose agent starts with a settings file (see [`with_settings`]).
+#[allow(clippy::too_many_arguments)]
+pub fn create_session_with(
+    project_name: &str,
+    project_path: &str,
+    task_name: &str,
+    task_branch: &str,
+    session_name: &str,
+    use_worktree: bool,
+    copy_patterns: &[String],
+    setup_commands: &[String],
+    initial_prompt: Option<&str>,
+    startup_skills: &[String],
+    agent: AgentKind,
+    settings: Option<&str>,
+) -> Result<String> {
+    // Checked before any worktree is made, so a bad path leaves nothing behind
+    with_settings(agent, String::new(), settings, None)?;
     let tmux_name = build_tmux_name(project_name, task_name, session_name);
 
     let work_dir;
@@ -406,13 +441,18 @@ pub fn create_session(
         is_main_session(session_name),
     );
 
-    let agent_cmd = build_agent_command(
+    let agent_cmd = with_settings(
         agent,
-        &work_dir,
-        Some(&system_prompt),
-        build_initial_prompt(startup_skills, initial_prompt, agent).as_deref(),
-        false,
-    );
+        build_agent_command(
+            agent,
+            &work_dir,
+            Some(&system_prompt),
+            build_initial_prompt(startup_skills, initial_prompt, agent).as_deref(),
+            false,
+        ),
+        settings,
+        Some(&tmux_name),
+    )?;
 
     let output = Command::new("tmux")
         .args([
@@ -1174,6 +1214,48 @@ pub fn session_agent(session_name: &str) -> AgentKind {
         .unwrap_or_default()
 }
 
+/// `cmd`, the launch of `agent`, changed to start with the settings file at
+/// `settings` (an absolute path): Claude Code reads it with `--settings` and,
+/// instead of `--dangerously-skip-permissions`, follows the permission rules and
+/// mode in it; OpenCode reads it as `OPENCODE_CONFIG` on a private server
+/// (`--standalone`, as the background service ignores the variable) and drops
+/// `--auto`. Other agents take no settings file. `None` leaves `cmd` as it is.
+/// A settings file that sets an `agent` makes Claude Code name the session
+/// after it (every worker would show as the same agent), so `name`, the tmux
+/// session's, goes to `--name` and becomes its display name and title.
+pub(crate) fn with_settings(agent: AgentKind, cmd: String, settings: Option<&str>, name: Option<&str>) -> Result<String> {
+    let Some(path) = settings.filter(|s| !s.is_empty()) else {
+        return Ok(cmd);
+    };
+    if !path.starts_with('/') || !Path::new(path).is_file() {
+        bail!("settings must be the absolute path of an existing file: {path:?}");
+    }
+    // An empty `cmd` only validates `settings`; any other must be the launch we know, or its arguments would be lost
+    let rest_after = |prefix: &str| -> Result<&str> {
+        match cmd.strip_prefix(prefix) {
+            Some(rest) => Ok(rest),
+            None if cmd.is_empty() => Ok(""),
+            None => bail!("unexpected {} launch, cannot add a settings file: {cmd:?}", agent.id()),
+        }
+    };
+    match agent {
+        AgentKind::Claude => {
+            let rest = rest_after("claude --dangerously-skip-permissions")?;
+            let name = name
+                .filter(|n| !n.is_empty())
+                .map(|n| format!(" --name {}", shell_escape(n)))
+                .unwrap_or_default();
+            Ok(format!("claude --settings {}{name}{rest}", shell_escape(path)))
+        }
+        AgentKind::OpenCode => {
+            let rest = rest_after("opencode")?;
+            let rest = rest.strip_prefix(" --auto").unwrap_or(rest);
+            Ok(format!("OPENCODE_CONFIG={} opencode --standalone{rest}", shell_escape(path)))
+        }
+        _ => bail!("a settings file works only with claude and opencode, not {}", agent.id()),
+    }
+}
+
 /// Assemble the shell command that launches (or resumes) the agent for a
 /// session. `system_prompt` is the session-context briefing — present for task
 /// sessions, absent for adhoc ones; for Claude it also implies loading the
@@ -1185,6 +1267,21 @@ pub(crate) fn build_agent_command(
     system_prompt: Option<&str>,
     initial_prompt: Option<&str>,
     resume: bool,
+) -> String {
+    build_agent_command_auto(agent, work_dir, system_prompt, initial_prompt, resume, true)
+}
+
+/// [`build_agent_command`] with an explicit `auto` for OpenCode: `true`
+/// launches it with `--auto` (allow every permission, so no dialog ever
+/// waits); `false` keeps its permission dialogs, which the showrunner plugin
+/// reports as `permission` status.
+pub(crate) fn build_agent_command_auto(
+    agent: AgentKind,
+    work_dir: &str,
+    system_prompt: Option<&str>,
+    initial_prompt: Option<&str>,
+    resume: bool,
+    auto: bool,
 ) -> String {
     match agent {
         AgentKind::Claude => {
@@ -1253,9 +1350,12 @@ pub(crate) fn build_agent_command(
         AgentKind::OpenCode => {
             // OpenCode's TUI positional is the *project directory*, not a
             // message — the prompt goes through `--prompt`. `--auto` mirrors the
-            // other agents' yolo launch; without it opencode stalls on every
-            // permission dialog.
-            let mut cmd = String::from("opencode --auto");
+            // other agents' yolo launch; without it opencode stops at every
+            // permission dialog until someone answers it.
+            let mut cmd = String::from("opencode");
+            if auto {
+                cmd.push_str(" --auto");
+            }
             if resume {
                 // cwd-scoped: continues the last session for this work dir.
                 cmd.push_str(" --continue");
@@ -2841,6 +2941,54 @@ pub fn cleanup_project_dirs(project_name: &str) {
 mod tests {
     use super::*;
 
+    // --- build_agent_command_auto (OpenCode --auto) ---
+
+    #[test]
+    fn opencode_auto_flag_follows_parameter() {
+        let auto = build_agent_command_auto(AgentKind::OpenCode, "/w", None, None, false, true);
+        assert_eq!(auto, "opencode --auto");
+        let manual = build_agent_command_auto(AgentKind::OpenCode, "/w", None, None, false, false);
+        assert_eq!(manual, "opencode");
+        // The default wrapper keeps the old launch.
+        let default = build_agent_command(AgentKind::OpenCode, "/w", None, None, false);
+        assert_eq!(default, "opencode --auto");
+    }
+
+    // --- detect_attention_dialog ---
+
+    #[test]
+    fn attention_dialog_claude_permission_prompt() {
+        let pane = "Bash(rm -rf build)\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n";
+        assert!(detect_attention_dialog(pane, AgentKind::Claude));
+    }
+
+    #[test]
+    fn attention_dialog_claude_input_prompt_suppresses_match() {
+        // Dialog text echoed in the transcript, with the input prompt back on screen.
+        let pane = "Do you want to proceed?\n  1. Yes\n\n───────\n❯\n───────\n";
+        assert!(!detect_attention_dialog(pane, AgentKind::Claude));
+    }
+
+    #[test]
+    fn attention_dialog_opencode_permission() {
+        let pane = "Permission required\n  Allow once\n  Allow always\n  Reject\n";
+        assert!(detect_attention_dialog(pane, AgentKind::OpenCode));
+    }
+
+    #[test]
+    fn attention_dialog_codex_selector() {
+        let pane = "Would you like to make the following edits?\n› 1. Yes, proceed\n  2. No\n";
+        assert!(detect_attention_dialog(pane, AgentKind::Codex));
+    }
+
+    #[test]
+    fn attention_dialog_plain_output_is_not_a_dialog() {
+        let pane = "building crate...\n   Compiling showrunner v0.1.0\n";
+        assert!(!detect_attention_dialog(pane, AgentKind::Claude));
+        assert!(!detect_attention_dialog(pane, AgentKind::Codex));
+        assert!(!detect_attention_dialog(pane, AgentKind::OpenCode));
+    }
+
     // --- sanitize ---
 
     #[test]
@@ -3062,6 +3210,63 @@ mod tests {
     #[test]
     fn shell_escape_with_spaces() {
         assert_eq!(shell_escape("hello world"), "'hello world'");
+    }
+
+    /// A settings file that exists for the life of the guard.
+    struct SettingsFile(PathBuf);
+    impl Drop for SettingsFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn settings_file() -> (SettingsFile, String) {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("showrunner-settings-{}-{nanos}.json", std::process::id()));
+        fs::write(&path, "{}").unwrap();
+        let text = path.to_string_lossy().into_owned();
+        (SettingsFile(path), text)
+    }
+
+    #[test]
+    fn with_settings_leaves_the_command_alone_without_a_file() {
+        let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
+        assert_eq!(with_settings(AgentKind::Claude, cmd.clone(), None, None).unwrap(), cmd);
+        assert_eq!(with_settings(AgentKind::Claude, cmd.clone(), Some(""), None).unwrap(), cmd);
+    }
+
+    #[test]
+    fn with_settings_drops_auto_approve_for_claude() {
+        let (_dir, path) = settings_file();
+        let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
+        let out = with_settings(AgentKind::Claude, cmd, Some(&path), None).unwrap();
+        assert_eq!(out, format!("claude --settings {} 'hi'", shell_escape(&path)));
+    }
+
+    #[test]
+    fn with_settings_names_the_claude_session() {
+        let (_dir, path) = settings_file();
+        let cmd = "claude --dangerously-skip-permissions 'hi'".to_string();
+        let out = with_settings(AgentKind::Claude, cmd, Some(&path), Some("coordinator")).unwrap();
+        assert_eq!(out, format!("claude --settings {} --name 'coordinator' 'hi'", shell_escape(&path)));
+    }
+
+    #[test]
+    fn with_settings_runs_opencode_standalone_without_auto() {
+        let (_dir, path) = settings_file();
+        let out = with_settings(AgentKind::OpenCode, "opencode --auto --prompt 'hi'".to_string(), Some(&path), None).unwrap();
+        assert_eq!(out, format!("OPENCODE_CONFIG={} opencode --standalone --prompt 'hi'", shell_escape(&path)));
+    }
+
+    #[test]
+    fn with_settings_refuses_missing_relative_or_unsupported() {
+        let (_dir, path) = settings_file();
+        assert!(with_settings(AgentKind::Claude, String::new(), Some("worker.settings.json"), None).is_err());
+        assert!(with_settings(AgentKind::Claude, String::new(), Some("/nowhere/x.json"), None).is_err());
+        assert!(with_settings(AgentKind::Codex, "codex".to_string(), Some(&path), None).is_err());
+        // A launch in another shape would lose its arguments, so it is refused; empty only validates
+        assert!(with_settings(AgentKind::Claude, "claude --continue 'hi'".to_string(), Some(&path), None).is_err());
+        assert!(with_settings(AgentKind::Claude, String::new(), Some(&path), None).is_ok());
     }
 
     // --- DiffStats ---

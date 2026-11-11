@@ -27,7 +27,23 @@ pub fn create_task_session(
     prompt: Option<&str>,
     agent: AgentKind,
 ) -> Result<String> {
-    let tmux_name = tmux::create_session(
+    create_task_session_with(cfg, project, task_name, branch, session_name, use_worktree, prompt, agent, None)
+}
+
+/// [`create_task_session`] whose agent starts with a settings file (see `tmux::with_settings`).
+#[allow(clippy::too_many_arguments)]
+pub fn create_task_session_with(
+    cfg: &Config,
+    project: &Project,
+    task_name: &str,
+    branch: &str,
+    session_name: String,
+    use_worktree: bool,
+    prompt: Option<&str>,
+    agent: AgentKind,
+    settings: Option<&str>,
+) -> Result<String> {
+    let tmux_name = tmux::create_session_with(
         &project.name,
         &project.path,
         task_name,
@@ -39,6 +55,7 @@ pub fn create_task_session(
         prompt,
         &cfg.startup_skills,
         agent,
+        settings,
     )?;
 
     config::add_session_record(
@@ -353,8 +370,15 @@ pub fn fork_session(source_tmux_name: &str) -> Result<String> {
 /// Spawn a worker under `parent` (a task session): a new session of the same
 /// task, in its own worktree on a branch off the task branch, started with
 /// `prompt`. Its record links back to `parent`. `agent` defaults to the
-/// parent's agent.
-pub fn spawn_worker(cfg: &Config, parent: &str, prompt: &str, agent: Option<&str>) -> Result<String> {
+/// parent's agent. `settings` starts it with that settings file (see
+/// `tmux::with_settings`).
+pub fn spawn_worker(
+    cfg: &Config,
+    parent: &str,
+    prompt: &str,
+    agent: Option<&str>,
+    settings: Option<&str>,
+) -> Result<String> {
     let record = config::load_sessions()
         .get(parent)
         .cloned()
@@ -367,7 +391,7 @@ pub fn spawn_worker(cfg: &Config, parent: &str, prompt: &str, agent: Option<&str
     let sessions = tmux::list_sessions().unwrap_or_default();
     let session_name =
         tmux::next_session_number(&record.project_name, &record.task_name, &sessions).to_string();
-    let tmux_name = create_task_session(
+    let tmux_name = create_task_session_with(
         cfg,
         project,
         &record.task_name,
@@ -376,6 +400,7 @@ pub fn spawn_worker(cfg: &Config, parent: &str, prompt: &str, agent: Option<&str
         record.use_worktree,
         Some(prompt),
         agent,
+        settings,
     )?;
     config::set_session_record_parent(&tmux_name, parent.to_string());
     Ok(tmux_name)

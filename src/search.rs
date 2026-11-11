@@ -119,6 +119,34 @@ pub fn claude_text(jsonl: &str) -> (Vec<String>, String) {
     (titles, body)
 }
 
+/// The last assistant text message from a Claude transcript (JSONL), trimmed.
+/// Returns `None` when no assistant text message is found.
+pub fn last_assistant_text(jsonl: &str) -> Option<String> {
+    let mut last: Option<String> = None;
+    for d in jsonl
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    {
+        if d["type"].as_str() != Some("assistant") {
+            continue;
+        }
+        let text = match &d["message"]["content"] {
+            Value::String(s) if !s.starts_with('<') => Some(s.trim()),
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .find(|s| !s.starts_with('<'))
+                .map(str::trim),
+            _ => None,
+        };
+        if let Some(t) = text.filter(|t| !t.is_empty()) {
+            last = Some(t.to_string());
+        }
+    }
+    last
+}
+
 /// Message text of a Codex rollout (JSONL).
 pub fn codex_text(jsonl: &str) -> String {
     let mut body = String::new();
@@ -188,6 +216,40 @@ pub(crate) fn codex_transcript(dir: &Path, id: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The last assistant text message of an agent's transcript, when it can be
+/// read and holds one. `None` for agents without a readable transcript.
+pub fn last_message(kind: AgentKind, id: &str) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let text = match kind {
+        AgentKind::Claude => read_tail(&claude_transcript(&home, id)?)?,
+        AgentKind::Codex => read_tail(&codex_transcript(&home.join(".codex/sessions"), id)?)?,
+        AgentKind::Pi | AgentKind::OpenCode | AgentKind::Custom(_) => return None,
+    };
+    match kind {
+        AgentKind::Claude => last_assistant_text(&text),
+        AgentKind::Codex => {
+            // Last agent message in the rollout.
+            let mut last: Option<String> = None;
+            for d in text
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            {
+                let p = &d["payload"];
+                if d["type"] == "event_msg"
+                    && p["type"].as_str() == Some("agent_message")
+                    && let Some(m) = p["message"].as_str()
+                    && let Some(m) = Some(m.trim())
+                    && !m.is_empty()
+                {
+                    last = Some(m.to_string());
+                }
+            }
+            last
+        }
+        AgentKind::Pi | AgentKind::OpenCode | AgentKind::Custom(_) => None,
+    }
 }
 
 /// Titles and text of an agent's transcript, when it can be read.
@@ -341,6 +403,28 @@ not json"#;
 {"type":"event_msg","payload":{"type":"token_count"}}
 {"type":"event_msg","payload":{"type":"agent_message","message":"Added retries."}}"#;
         assert_eq!(codex_text(jsonl), "add retries\nAdded retries.\n");
+    }
+
+    #[test]
+    fn last_assistant_text_is_the_last_text_message() {
+        let jsonl = r#"{"type":"user","message":{"content":"hi"}}
+{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"First answer."}]}}
+{"type":"assistant","message":{"content":"<command-name>/clear</command-name>"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"x"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"  Second answer.  "}]}}"#;
+        assert_eq!(
+            last_assistant_text(jsonl).as_deref(),
+            Some("Second answer.")
+        );
+        // A transcript with no assistant text message yields None.
+        assert_eq!(last_assistant_text(r#"{"type":"user","message":{"content":"hi"}}"#), None);
+        // A string content message is read too.
+        assert_eq!(
+            last_assistant_text(r#"{"type":"assistant","message":{"content":"Plain text answer."}}"#)
+                .as_deref(),
+            Some("Plain text answer.")
+        );
     }
 
     #[test]
