@@ -137,7 +137,6 @@ Keybindings are configurable in `~/.showrunner/keybindings.toml` — see
 - Restart an agent session from the TUI (kill + relaunch, resuming the
   conversation; preserves worktree/branch)
 - Auto-close sessions (idle + finished, dirty-worktree safeguard; opt-in)
-- OS notifications when a session needs a decision (permission prompt, etc.)
 - Authoritative agent hooks via the daemon — Claude Code (plugin `hooks.json`),
   OpenCode (auto-loaded plugin), and Codex (`notify` on turn-complete); Pi uses
   the pane-scrape fallback

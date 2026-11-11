@@ -483,27 +483,6 @@ fn parse_sse_frame(frame: &str) -> Option<WorkerUpdate> {
     serde_json::from_str::<WorkerUpdate>(&data).ok()
 }
 
-/// Notify on a pane entering a state that wants the user, unless they are
-/// looking at it. Permission prompts in `cm__` sessions are left to the
-/// session-level notification, which also covers scrape-only agents.
-fn notify_pane_status(pane: &Pane, status: AgentStatus) {
-    if pane.active && pane.attached {
-        return;
-    }
-    let what = match status {
-        AgentStatus::Permission if TmuxSession::from_tmux_name(&pane.session).is_some() => return,
-        AgentStatus::Permission => "needs permission",
-        AgentStatus::Question => "has a question",
-        AgentStatus::Done => "finished",
-        _ => return,
-    };
-    crate::notify::send(&crate::notify::Notification {
-        title: format!("showrunner: agent {what}"),
-        body: format!("{}:{} ({})", pane.session, pane.window_name, pane.id),
-        urgent: status != AgentStatus::Done,
-    });
-}
-
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -558,7 +537,6 @@ fn worker_loop(
     let hostname = crate::app::detect_hostname();
     let mut idle_since: HashMap<String, Instant> = HashMap::new();
     let mut ac_acted: HashMap<String, CloseAction> = HashMap::new();
-    let mut prev_statuses: HashMap<String, SessionStatus> = HashMap::new();
     // How many consecutive ticks a session has looked finished. `Finished` is
     // only reported (and thus becomes auto-close eligible) after it persists, so
     // a single transient probe failure can't kill a clean session.
@@ -714,9 +692,7 @@ fn worker_loop(
         // Pane-level status for every pane on the server (not only `cm__`
         // sessions), published to tmux as window options.
         let now = unix_now();
-        for (pane, status) in inventory::update_statuses(&mut pane_states, &panes, now) {
-            notify_pane_status(pane, status);
-        }
+        inventory::update_statuses(&mut pane_states, &panes, now);
         // Deliver queued messages to agents that are now idle or done — one per
         // pane per tick, so the agent becomes working again and the next message
         // waits for the next idle. The daemon owns the queue; a fallback prober
@@ -755,22 +731,6 @@ fn worker_loop(
         inventory::apply_window_options(&mut published_windows, &panes, &pane_states, now);
         crate::naming::apply_names(&panes, &pane_states, &naming, &hostname);
         snapshots.tick(&panes, &mut pane_states, &restore.redact, now);
-
-        // Surface a permission prompt to the OS (once per transition), so the
-        // user is alerted even when the TUI is in another pane. The tmux status
-        // bar badge is driven separately by the daemon's status.cache.
-        for (name, status) in statuses.iter() {
-            if *status == SessionStatus::WaitingForPermission
-                && prev_statuses.get(name) != Some(&SessionStatus::WaitingForPermission)
-            {
-                crate::notify::send(&crate::notify::Notification {
-                    title: "showrunner: approval needed".to_string(),
-                    body: format!("Session '{name}' is waiting for a permission decision."),
-                    urgent: true,
-                });
-            }
-        }
-        prev_statuses = statuses.clone();
 
         // Publish statuses right away with the previously computed maps — the
         // git work below can take many seconds on a cold start, and statuses
@@ -889,7 +849,6 @@ fn worker_loop(
         // Prune per-session bookkeeping for sessions that no longer exist so the
         // maps stay bounded as sessions come and go.
         let alive: HashSet<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
-        prev_statuses.retain(|n, _| alive.contains(n.as_str()));
         ac_acted.retain(|n, _| alive.contains(n.as_str()));
         idle_since.retain(|n, _| alive.contains(n.as_str()));
         finished_ticks.retain(|n, _| alive.contains(n.as_str()));
@@ -1040,8 +999,6 @@ fn auto_close_step(
                 d
             }
         };
-        let reason = if finished { "finished" } else { "idle" };
-
         let action = autoclose::evaluate(
             cfg,
             &autoclose::SessionCloseState {
@@ -1056,7 +1013,7 @@ fn auto_close_step(
             CloseAction::Close => {
                 let target = autoclose::Target::Session(name.clone());
                 let closed = snapshots.close(vec![target], CloseReason::AutoClose, unix_now());
-                let Some((_, id)) = closed.first() else {
+                let Some(_) = closed.first() else {
                     continue;
                 };
                 // Mark the record so the TUI's startup restore doesn't bring an
@@ -1065,23 +1022,10 @@ fn auto_close_step(
                 idle_since.remove(name);
                 acted.remove(name);
                 dirty_cache.remove(name);
-                crate::notify::send(&crate::notify::Notification {
-                    title: "showrunner: auto-closed".to_string(),
-                    body: format!(
-                        "Session '{name}' was auto-closed ({reason}, clean). \
-                         Reopen: showrunner reopen {id}"
-                    ),
-                    urgent: false,
-                });
             }
             CloseAction::Confirm => {
                 if acted.get(name) != Some(&CloseAction::Confirm) {
                     acted.insert(name.clone(), CloseAction::Confirm);
-                    crate::notify::send(&crate::notify::Notification {
-                        title: "showrunner: auto-close blocked".to_string(),
-                        body: format!("Session '{name}' has uncommitted changes; it was not auto-closed."),
-                        urgent: true,
-                    });
                 }
             }
             CloseAction::None => {
