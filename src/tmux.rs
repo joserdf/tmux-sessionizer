@@ -508,6 +508,75 @@ pub fn create_session_with(
     Ok(tmux_name)
 }
 
+/// Create a git worktree for a worker window in the coordinator's session: a fresh
+/// worktree at `base_dir()/worktrees/<project>/<worker>`, on a branch forked off `base`
+/// (default `main`), with the project's copy patterns and setup commands applied and the
+/// agent's skills installed. Returns the worktree path. The worker branch is derived from
+/// the worker name unless `branch` is given. `project_name` names the worktree folder;
+/// `project_path` is where the worktree is forked from.
+pub fn create_worker_worktree(
+    project_path: &str,
+    project_name: &str,
+    worker_name: &str,
+    copy_patterns: &[String],
+    setup_commands: &[String],
+    branch: Option<&str>,
+    base: Option<&str>,
+    agent: AgentKind,
+) -> Result<String> {
+    let worker_name = worker_name.trim();
+    if worker_name.is_empty() {
+        bail!("a worktree window needs a name");
+    }
+    let default_branch = to_branch_name(worker_name);
+    let branch = branch.filter(|b| !b.trim().is_empty()).unwrap_or(&default_branch);
+    let base = base.filter(|b| !b.trim().is_empty()).unwrap_or("main");
+    let wt_path = crate::config::base_dir()
+        .join("worktrees")
+        .join(sanitize(project_name))
+        .join(sanitize(worker_name));
+    if let Some(parent) = wt_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let wt_str = wt_path.to_string_lossy().to_string();
+
+    if !branch_exists(project_path, branch) {
+        create_task_branch(project_path, branch, Some(base))?;
+    }
+    let status = Command::new("git")
+        .args(["-C", project_path, "worktree", "add", &wt_str, branch])
+        .output()?;
+    if !status.status.success() {
+        bail!(
+            "Failed to create worker worktree: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        );
+    }
+
+    let mut all_patterns = vec![".claude/***".to_string()];
+    all_patterns.extend_from_slice(copy_patterns);
+    let wtinclude = read_worktreeinclude(Path::new(project_path));
+    let recursive = !wtinclude.is_empty();
+    if recursive {
+        for pattern in wtinclude {
+            if !all_patterns.contains(&pattern) {
+                all_patterns.push(pattern);
+            }
+        }
+    }
+    copy_patterns_to_worktree(project_path, &wt_str, &all_patterns, recursive);
+
+    for cmd in setup_commands {
+        let out = Command::new("sh").args(["-c", cmd]).current_dir(&wt_str).output()?;
+        if !out.status.success() {
+            bail!("Setup command failed: {cmd}");
+        }
+    }
+
+    install_agent_skills(agent, &wt_str);
+    Ok(wt_str)
+}
+
 /// Create an adhoc session: tmux session running Claude in the project directory
 /// on whatever branch is currently checked out, with no task or worktree.
 /// Applies `startup_skills` if any, but sends no user prompt.
@@ -3735,6 +3804,46 @@ Some transcript output.\n\
         std::fs::write(dir.join("scratch.txt"), "x").unwrap();
         assert!(worktree_dirty_failsafe(&p), "untracked file should read dirty");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_worker_worktree_forks_a_branch_in_a_fresh_worktree() {
+        let dir = std::env::temp_dir().join(format!("sr_wtw_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("f.txt"), "x").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+
+        let p = dir.to_string_lossy().to_string();
+        let wt = create_worker_worktree(&p, "proj", "task-3-fix", &[], &[], None, None, AgentKind::Claude).unwrap();
+        let wt_dir = std::path::Path::new(&wt);
+        assert!(wt_dir.join("f.txt").exists(), "worktree copies the tree");
+        let branch = std::process::Command::new("git")
+            .args(["-C", &wt, "branch", "--show-current"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "task-3-fix");
+        assert!(branch_exists(&p, "task-3-fix"), "worker branch exists in the source repo");
+
+        let _ = std::process::Command::new("git")
+            .args(["-C", &p, "worktree", "remove", "--force", &wt])
+            .output();
+        let _ = std::fs::remove_dir_all(&wt_dir);
+        if let Some(parent) = wt_dir.parent() {
+            let _ = std::fs::remove_dir_all(parent); // the project dir under worktrees/
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

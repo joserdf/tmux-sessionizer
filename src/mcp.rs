@@ -171,6 +171,14 @@ struct CreateWindow {
         description = "Claude or OpenCode only: absolute path of a settings file the agent starts with. Claude Code gets `--settings <file>` and follows its permission rules instead of skipping them; OpenCode gets it as OPENCODE_CONFIG on a private server, without --auto"
     )]
     settings: Option<String>,
+    #[schemars(
+        description = "Create the window in a fresh git worktree of its own branch (a worker window): cwd is the project root, the window opens in base_dir()/worktrees/<project>/<name> on a branch forked off main"
+    )]
+    worktree: Option<bool>,
+    #[schemars(description = "For a worktree window: the branch to fork off the base (default: derived from the window name)")]
+    branch: Option<String>,
+    #[schemars(description = "For a worktree window: the base branch the worker branch forks off (default: main)")]
+    base: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -598,7 +606,7 @@ impl Server {
         description = "Add a window to a session, optionally starting an agent with a first prompt"
     )]
     async fn windows_create(&self, Parameters(p): Parameters<CreateWindow>) -> Out {
-        self.act(move |inv, _| {
+        self.act(move |inv, cfg| {
             inv.create_window(
                 &p.session,
                 p.cwd.as_deref(),
@@ -606,6 +614,10 @@ impl Server {
                 p.prompt.as_deref(),
                 p.name.as_deref(),
                 p.settings.as_deref(),
+                cfg,
+                p.worktree.unwrap_or(false),
+                p.branch.as_deref(),
+                p.base.as_deref(),
             )
         })
         .await

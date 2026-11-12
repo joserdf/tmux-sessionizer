@@ -553,10 +553,49 @@ impl Inventory {
         prompt: Option<&str>,
         name: Option<&str>,
         settings: Option<&str>,
+        cfg: &Config,
+        worktree: bool,
+        worktree_branch: Option<&str>,
+        worktree_base: Option<&str>,
     ) -> Result<Value> {
         let base = self.resolve(session.split(':').next().unwrap_or(session))?;
         let session = base.pane.session.as_str();
-        let cwd = existing_dir(cwd.unwrap_or(&base.pane.cwd))?;
+        let mut cwd = existing_dir(cwd.unwrap_or(&base.pane.cwd))?;
+        if worktree {
+            let worker = name
+                .filter(|n| !n.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("a worktree window needs a name"))?;
+            let (project_name, copy_patterns, setup_commands) = match cfg
+                .projects
+                .iter()
+                .find(|p| p.path == cwd)
+            {
+                Some(p) => (
+                    p.name.clone(),
+                    p.copy_patterns.clone(),
+                    p.setup_commands.clone(),
+                ),
+                None => (
+                    std::path::Path::new(&cwd)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "project".to_string()),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
+            let kind = AgentKind::from_id(agent.unwrap_or_default()).unwrap_or_default();
+            cwd = crate::tmux::create_worker_worktree(
+                &cwd,
+                &project_name,
+                worker,
+                &copy_patterns,
+                &setup_commands,
+                worktree_branch,
+                worktree_base,
+                kind,
+            )?;
+        }
         let command = match (
             agent_command(agent, &cwd, prompt, true)?,
             settings.filter(|s| !s.is_empty()),
